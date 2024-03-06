@@ -10,6 +10,10 @@ use core::{
     sync::atomic::{self, AtomicPtr, AtomicU32, AtomicUsize},
 };
 
+mod thread_owned;
+
+use thread_owned::ThreadOwned;
+
 const SMALL_PAGE_SIZE: usize = 64 << 10;
 const SEGMENT_SIZE: usize = 4 << 20;
 
@@ -95,6 +99,25 @@ impl PageMeta {
     }
 }
 
+impl ThreadOwned<'_, PageMeta> {
+    #[inline]
+    fn next_page(&mut self) -> &mut Option<NonNull<PageMeta>> {
+        unsafe { &mut *self.next_page.get() }
+    }
+    #[inline]
+    fn free(&mut self) -> &mut *mut FreeList {
+        unsafe { &mut *self.free.get() }
+    }
+    #[inline]
+    fn local_free(&mut self) -> &mut *mut FreeList {
+        unsafe { &mut *self.local_free.get() }
+    }
+    #[inline]
+    fn used(&mut self) -> &mut u32 {
+        unsafe { &mut *self.used.get() }
+    }
+}
+
 struct SegmentMeta {
     thread_id: u32,
     page_kind: PageKind,
@@ -144,6 +167,12 @@ impl Segment {
     }
 }
 
+impl ThreadOwned<'_, Segment> {
+    fn meta(&mut self) -> ThreadOwned<'_, SegmentMeta> {
+        unsafe { ThreadOwned::new(&self.meta) }
+    }
+}
+
 impl ops::Deref for Segment {
     type Target = SegmentMeta;
     fn deref(&self) -> &SegmentMeta {
@@ -189,13 +218,30 @@ impl ThreadAllocator {
             free_small_pages: UnsafeCell::new(None),
         }
     }
+}
+
+impl ThreadOwned<'_, ThreadAllocator> {
+    #[inline]
+    fn free_small_pages(&mut self) -> &mut Option<NonNull<PageMeta>> {
+        unsafe { &mut *self.free_small_pages.get() }
+    }
+    #[inline]
+    fn full_pages(&mut self) -> &mut Option<NonNull<PageMeta>> {
+        unsafe { &mut *self.full_pages.get() }
+    }
+    #[inline]
+    fn small_page(&mut self, class: usize) -> &mut Option<NonNull<PageMeta>> {
+        unsafe { &mut *self.small_pages[class].get() }
+    }
+    #[inline]
+    fn large_page(&mut self, class: usize) -> &mut Option<NonNull<PageMeta>> {
+        unsafe { &mut *self.large_pages[class].get() }
+    }
 
     /// Access locally
-    unsafe fn free_small_page(&self, page: &mut PageMeta) {
-        let free_pages = unsafe { &mut *self.free_small_pages.get() };
-
-        *page.next_page.get_mut() = *free_pages;
-        *free_pages = Some(page.into());
+    unsafe fn free_small_page(&mut self, page: &mut PageMeta) {
+        *page.next_page.get_mut() = *self.free_small_pages();
+        *self.free_small_pages() = Some(page.into());
 
         let seg = unsafe { &*Segment::from_ptr(page) };
         let seg_used = unsafe { &mut *seg.used.get() };
@@ -207,17 +253,14 @@ impl ThreadAllocator {
     }
 
     /// Access locally
-    unsafe fn get_small_page(&self, class: usize) -> &PageMeta {
-        let free_pages = unsafe { &mut *self.free_small_pages.get() };
-        let class_page = unsafe { &mut *self.small_pages[class].get() };
-
-        while let Some(page) = *class_page {
+    unsafe fn get_small_page(&mut self, class: usize) -> &PageMeta {
+        while let Some(page) = self.small_page(class) {
             let page = unsafe { page.as_ref() };
             let next_page = unsafe { *page.next_page.get() };
             if unsafe { *page.used.get() } == page.thread_freed.load(atomic::Ordering::Relaxed)
                 && next_page.is_some()
             {
-                *class_page = next_page;
+                *self.small_page(class) = next_page;
             } else {
                 return page;
             }
