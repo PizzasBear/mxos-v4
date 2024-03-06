@@ -1,0 +1,25 @@
+[package]
+name = "kernel"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bootloader_api = "0.11"
+x86_64 = "0.14"
+raw-cpuid = "11.0"
+rand = { version = "0.8", default-features = false, features = [
+    "std_rng",
+    "small_rng",
+] }
+qoi = { version = "0.4", default-features = false }
+# ab_glyph = { version = "0.2", default-features = false, features = [
+#     "libm",
+#     "variable-fonts",
+# ] }
+libm = "0.2"
+uart_16550 = "0.3"
+spin = "0.9"
+log = "0.4"
+bitflags = "2.4"
+bytemuck = { version = "1.14", features = ["derive"] }
+heapless = "0.8"

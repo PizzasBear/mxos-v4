@@ -1,0 +1,280 @@
+use alloc::{boxed::Box, collections::LinkedList};
+use core::{
+    alloc::{GlobalAlloc, Layout},
+    array,
+    cmp::Ordering,
+    mem,
+    ptr::NonNull,
+    slice,
+    sync::atomic::AtomicU32,
+};
+
+use crate::bitmap::Bitmap;
+
+mod pairing_heap;
+
+use pairing_heap::PairingHeap;
+
+const ALLOC_PAGE_SIZE: usize = 0x4000;
+const LOG_ALLOC_PAGE_SIZE: u32 = ALLOC_PAGE_SIZE.trailing_zeros();
+const SMALL_SIZE_CLASSES: [usize; 36] = [
+    0x8, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0xa0, 0xc0, 0xe0, 0x100, 0x140, 0x180,
+    0x1c0, 0x200, 0x280, 0x300, 0x380, 0x400, 0x500, 0x600, 0x700, 0x800, 0xa00, 0xc00, 0xe00,
+    0x1000, 0x1400, 0x1800, 0x1c00, 0x2000, 0x2800, 0x3000, 0x3800,
+];
+
+const fn size_to_bin(size: usize) -> Option<usize> {
+    if SMALL_SIZE_CLASSES[SMALL_SIZE_CLASSES.len() - 1] < size {
+        return None;
+    }
+
+    let mut i = SMALL_SIZE_CLASSES.len() / 2;
+    if size < SMALL_SIZE_CLASSES[i] {
+        i = 0;
+    }
+    while i < SMALL_SIZE_CLASSES.len() {
+        if size <= SMALL_SIZE_CLASSES[i] {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+#[derive(Debug, Clone, Copy)]
+#[repr(align(8))]
+struct RadixTreeLevel {
+    bits: u32,
+    offset: u32,
+}
+
+impl RadixTreeLevel {
+    fn index(&self, ptr: usize) -> usize {
+        ptr >> self.offset & !((1 << self.bits) - 1)
+    }
+}
+
+/// The number of key bits distinguished by this level,
+/// and the cumulative number of key bits distinguished by traversing to corresponding tree
+/// level.
+const RADIX_TREE_LEVEL_BITS: [RadixTreeLevel; 3] = {
+    // Number of low insigificant bits
+    let nlib: u32 = LOG_ALLOC_PAGE_SIZE;
+    // Number of significant bits
+    let nsb: u32 = 48 - nlib;
+
+    [
+        RadixTreeLevel {
+            bits: nsb / 3,
+            offset: nlib + nsb / 3 * 2 + nsb % 3,
+        },
+        RadixTreeLevel {
+            bits: nsb / 3 + nsb % 3 / 2,
+            offset: nlib + nsb / 3 + nsb % 3 - nsb % 3 / 2,
+        },
+        RadixTreeLevel {
+            bits: nsb / 3 + nsb % 3 - nsb % 3 / 2,
+            offset: nlib,
+        },
+    ]
+};
+
+#[derive(Debug, Clone, Copy)]
+#[repr(align(16))]
+struct RadixTreeCacheEntry {
+    ptr: usize,
+    leaf: Option<NonNull<RadixTreeLeaf>>,
+}
+
+unsafe impl Send for RadixTreeCacheEntry {}
+
+struct RadixTree {
+    entries: [Option<Box<RadixTreeInner>>; 1 << RADIX_TREE_LEVEL_BITS[0].bits],
+    l1_cache: [RadixTreeCacheEntry; 16],
+    l2_cache: [RadixTreeCacheEntry; 8],
+}
+
+impl RadixTree {
+    fn new() -> Self {
+        Self {
+            entries: array::from_fn(|_| None),
+            l1_cache: array::from_fn(|_| RadixTreeCacheEntry { ptr: 0, leaf: None }),
+            l2_cache: array::from_fn(|_| RadixTreeCacheEntry { ptr: 0, leaf: None }),
+        }
+    }
+
+    fn l1cache_key(mut ptr: usize) -> usize {
+        ptr >>= RADIX_TREE_LEVEL_BITS[2].offset;
+        ptr ^= ptr >> RADIX_TREE_LEVEL_BITS[2].bits;
+        ptr & 15
+    }
+    fn lookup(&mut self, ptr: usize) -> Option<&mut RadixTreeEntry> {
+        let l1_key = Self::l1cache_key(ptr);
+        let l1_entry = self.l1_cache[l1_key];
+        if let (true, Some(mut leaf)) = (l1_entry.ptr == ptr, l1_entry.leaf) {
+            return Some(unsafe { leaf.as_mut().entry_mut(ptr) });
+        }
+        if let Some(mut leaf) = self
+            .l2_cache
+            .iter()
+            .find_map(|&e| (e.ptr == ptr).then_some(e.leaf?))
+        {
+            self.l2_cache.copy_within(0.., 1);
+            self.l2_cache[0] = l1_entry;
+            self.l1_cache[l1_key] = RadixTreeCacheEntry {
+                ptr,
+                leaf: Some(leaf),
+            };
+            return Some(unsafe { leaf.as_mut().entry_mut(ptr) });
+        }
+
+        let mid_tbl = self.entries[RADIX_TREE_LEVEL_BITS[0].index(ptr)].as_deref_mut()?;
+        let leaf = mid_tbl.entry_mut(ptr)?;
+
+        self.l2_cache.copy_within(0.., 1);
+        self.l2_cache[0] = l1_entry;
+        self.l1_cache[l1_key] = RadixTreeCacheEntry {
+            ptr,
+            leaf: Some(leaf.into()),
+        };
+
+        Some(leaf.entry_mut(ptr))
+    }
+}
+
+struct RadixTreeInner {
+    entries: [Option<Box<RadixTreeLeaf>>; 1 << RADIX_TREE_LEVEL_BITS[1].bits],
+}
+
+const S: usize = mem::size_of::<RadixTreeInner>();
+
+impl RadixTreeInner {
+    fn entry_mut(&mut self, ptr: usize) -> Option<&mut RadixTreeLeaf> {
+        self.entries[RADIX_TREE_LEVEL_BITS[1].index(ptr)].as_deref_mut()
+    }
+}
+
+struct RadixTreeLeaf {
+    entries: [RadixTreeEntry; 1 << RADIX_TREE_LEVEL_BITS[2].bits],
+}
+
+impl RadixTreeLeaf {
+    fn entry_mut(&mut self, ptr: usize) -> &mut RadixTreeEntry {
+        &mut self.entries[RADIX_TREE_LEVEL_BITS[2].index(ptr)]
+    }
+}
+
+struct RadixTreeEntry(u64);
+
+struct Extent {
+    birth: u32,
+    size: usize,
+    ptr: NonNull<()>,
+
+    first_set: usize,
+}
+
+unsafe impl Send for Extent {}
+
+impl PartialEq for Extent {
+    fn eq(&self, other: &Self) -> bool {
+        todo!();
+    }
+}
+impl Eq for Extent {}
+impl PartialOrd for Extent {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for Extent {
+    fn cmp(&self, other: &Self) -> Ordering {
+        (self.birth, self.ptr)
+            .cmp(&(other.birth, other.ptr))
+            .reverse()
+    }
+}
+
+struct Bin {
+    size_class: u8,
+    curr_slab: Option<Extent>,
+    nonfull_extents: PairingHeap<Extent>,
+    full_extents: LinkedList<Extent>,
+}
+
+impl Bin {
+    fn get_curr_slab(&mut self) -> Option<&mut Extent> {
+        match &mut self.curr_slab {
+            Some(slab) => Some(slab),
+            slab @ None => Some(slab.insert(self.nonfull_extents.pop()?)),
+        }
+    }
+
+    fn alloc(&mut self) -> Option<NonNull<()>> {
+        let alloc_size = SMALL_SIZE_CLASSES[self.size_class as usize];
+
+        let slab = self.get_curr_slab()?;
+        let bitmap_size =
+            (slab.size / alloc_size + usize::BITS as usize - 1) / usize::BITS as usize;
+        let bitmap = Bitmap::from_slice_mut(unsafe {
+            slice::from_raw_parts_mut(slab.ptr.as_ptr().cast(), bitmap_size)
+        });
+
+        bitmap.find_first_unset(slab.first_set);
+        todo!();
+    }
+}
+
+impl PartialEq for Bin {
+    fn eq(&self, other: &Self) -> bool {
+        todo!();
+    }
+}
+impl Eq for Bin {}
+impl PartialOrd for Bin {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for Bin {
+    fn cmp(&self, other: &Self) -> Ordering {
+        todo!();
+    }
+}
+
+struct Allocator {
+    counter: AtomicU32,
+    bins: spin::Lazy<[spin::Mutex<Bin>; SMALL_SIZE_CLASSES.len()]>,
+    extent_data: spin::Lazy<spin::Mutex<RadixTree>>,
+}
+
+unsafe impl GlobalAlloc for Allocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        if let Some(bin) = size_to_bin(layout.size()) {
+            _ = &self.bins[bin];
+            todo!();
+        } else {
+            todo!()
+        }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        todo!()
+    }
+}
+
+#[global_allocator]
+static GLOBAL_ALLOC: Allocator = Allocator {
+    counter: AtomicU32::new(0),
+    bins: spin::Lazy::new(|| {
+        array::from_fn(|i| {
+            spin::Mutex::new(Bin {
+                size_class: i as _,
+                curr_slab: None,
+                nonfull_extents: PairingHeap::new(),
+                full_extents: LinkedList::new(),
+            })
+        })
+    }),
+    extent_data: spin::Lazy::new(|| spin::Mutex::new(RadixTree::new())),
+};

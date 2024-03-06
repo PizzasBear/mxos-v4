@@ -1,0 +1,5 @@
+[workspace]
+default-members = ["runner"]
+members = ["kernel", "runner"]
+exclude = ["uefi-attempt"]
+resolver = "2"

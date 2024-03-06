@@ -1,0 +1,14 @@
+[package]
+name = "runner"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[build-dependencies]
+bootloader = "0.11"
+kernel = { path = "../kernel", artifact = "bin", target = "x86_64-unknown-none" }
+
+[dependencies]
+time = { version = "0.3", features = ["formatting", "macros", "local-offset"] }
+anyhow = "1.0"
