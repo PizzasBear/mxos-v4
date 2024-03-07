@@ -96,22 +96,20 @@ enum ThreadFreeState {
 }
 
 struct PageMeta {
-    /// Accessed only locally
-    next_page: UnsafeCell<Option<NonNull<PageMeta>>>,
-    /// Accessed only locally
+    next: UnsafeCell<Option<NonNull<ThreadOwned<PageMeta>>>>,
+    prev: UnsafeCell<Option<NonNull<ThreadOwned<PageMeta>>>>,
     free: UnsafeCell<*mut FreeList>,
-    /// Accessed only locally
     local_free: UnsafeCell<*mut FreeList>,
     thread_free: AtomicUsize,
     used: UnsafeCell<u32>,
     thread_freed: AtomicU32,
-    // capacity: u32,
 }
 
 impl PageMeta {
     const fn new() -> Self {
         Self {
-            next_page: UnsafeCell::new(None),
+            next: UnsafeCell::new(None),
+            prev: UnsafeCell::new(None),
             free: UnsafeCell::new(ptr::null_mut()),
             local_free: UnsafeCell::new(ptr::null_mut()),
             thread_free: AtomicUsize::new(0),
@@ -210,14 +208,16 @@ struct FreeList {
 //     next: AtomicPtr<Self>,
 // }
 
+type ThreadPagePtr = Option<NonNull<ThreadOwned<PageMeta>>>;
+
 struct ThreadAllocator {
     thread_id: u32,
     /// Accessed only locally
-    pages: [UnsafeCell<Option<NonNull<PageMeta>>>; NUM_SIZE_CLASSES],
+    pages: [UnsafeCell<ThreadPagePtr>; NUM_SIZE_CLASSES],
     /// Accessed only locally
-    free_small_pages: UnsafeCell<Option<NonNull<PageMeta>>>,
+    free_small_pages: UnsafeCell<ThreadPagePtr>,
     /// Accessed only locally
-    full_pages: UnsafeCell<Option<NonNull<PageMeta>>>,
+    full_pages: UnsafeCell<ThreadPagePtr>,
     delayed_free: AtomicPtr<FreeList>,
 }
 
@@ -233,11 +233,22 @@ impl ThreadAllocator {
     }
 }
 
+unsafe fn push_page_list(list: &mut ThreadPagePtr, page: &ThreadOwned<PageMeta>) {
+    if let Some(list) = list {
+        unsafe { *list.as_ref().prev.get() = Some(page.into()) };
+    }
+    unsafe { *page.next.get() = *list };
+    *list = Some(page.into());
+}
+
 impl ThreadOwned<ThreadAllocator> {
     unsafe fn free_small_page(&self, page: &mut PageMeta) {
         let free_pages = unsafe { &mut *self.free_small_pages.get() };
-        *page.next_page.get_mut() = *free_pages;
-        *free_pages = Some(page.into());
+        *page.next.get_mut() = *free_pages;
+        if let Some(free_pages) = free_pages {
+            unsafe { *free_pages.as_ref().prev.get() = Some(ThreadOwned::from_mut(page).into()) };
+        }
+        *free_pages = Some(ThreadOwned::from_mut(page).into());
 
         let seg = unsafe { ThreadOwned::from_ref(&*Segment::from_ptr(page)) };
         let seg_used = unsafe { &mut *seg.used.get() };
@@ -250,12 +261,15 @@ impl ThreadOwned<ThreadAllocator> {
 
     unsafe fn find_page(&self, class: usize) -> Option<&ThreadOwned<PageMeta>> {
         while let Some(page) = unsafe { *self.pages[class].get() } {
-            let page = unsafe { ThreadOwned::from_ref(page.as_ref()) };
-            let next_page = unsafe { &mut *page.next_page.get() };
+            let page = unsafe { page.as_ref() };
+            let next_page = unsafe { *page.next.get() };
             if unsafe { *page.used.get() } == page.thread_freed.load(atomic::Ordering::Relaxed)
                 && next_page.is_some()
             {
-                unsafe { *self.pages[class].get() = *next_page };
+                if let Some(next_page) = next_page {
+                    unsafe { *next_page.as_ref().prev.get() = None };
+                }
+                unsafe { *self.pages[class].get() = next_page };
                 unsafe { self.free_small_page(page.upgrade_exclusive()) };
             } else {
                 let seg = unsafe { ThreadOwned::from_ref(&*Segment::from_ptr(page)) };
@@ -285,16 +299,16 @@ impl ThreadOwned<ThreadAllocator> {
                 let mut free_pages = *free_small_pages;
                 for page in &mut segment.pages {
                     let page = unsafe { page.assume_init_mut() };
-                    *page.next_page.get_mut() = free_pages;
-                    free_pages = Some(page.into());
+                    *page.next.get_mut() = free_pages;
+                    free_pages = Some(ThreadOwned::from_mut(page).into());
                 }
                 unsafe { free_pages.unwrap_unchecked().as_mut() }
             }
         };
 
         let class_page = unsafe { &mut *self.pages[class].get() };
-        *free_small_pages = *page.next_page.get_mut();
-        *page.next_page.get_mut() = *class_page;
+        *free_small_pages = *page.next.get_mut();
+        *page.next.get_mut() = *class_page;
         *class_page = Some(page.into());
 
         let page_start = Segment::small_page_start(page as _);
@@ -338,7 +352,7 @@ impl ThreadOwned<ThreadAllocator> {
         }
 
         let class_page = unsafe { &mut *self.pages[class].get() };
-        *page.next_page.get_mut() = *class_page;
+        *page.next.get_mut() = *class_page;
         *class_page = Some(page.into());
 
         page
@@ -398,7 +412,7 @@ impl ThreadOwned<ThreadAllocator> {
                     break free.as_ptr() as _;
                 }
                 None => {
-                    let next_page = unsafe { &mut *page.next_page.get() };
+                    let next_page = unsafe { &mut *page.next.get() };
                     let full_pages = unsafe { &mut *self.full_pages.get() };
                     unsafe { *self.pages[class].get() = *next_page };
                     *next_page = *full_pages;
