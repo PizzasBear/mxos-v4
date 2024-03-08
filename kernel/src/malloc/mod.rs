@@ -94,12 +94,6 @@ impl<T> ops::DerefMut for ThreadOwned<T> {
     }
 }
 
-enum PageKind {
-    /// 64 KiB pages
-    Small,
-    Large,
-}
-
 #[repr(u8)]
 enum ThreadFreeState {
     Normal = 0,
@@ -115,7 +109,10 @@ struct PageMeta {
     thread_free: AtomicUsize,
     used: UnsafeCell<u32>,
     thread_freed: AtomicU32,
+    is_full: UnsafeCell<bool>,
 }
+
+unsafe impl Sync for PageMeta {}
 
 impl PageMeta {
     const fn new(prev_next: NonNull<ThreadPagePtr>) -> Self {
@@ -127,20 +124,10 @@ impl PageMeta {
             thread_free: AtomicUsize::new(0),
             used: UnsafeCell::new(0),
             thread_freed: AtomicU32::new(0),
+            is_full: UnsafeCell::new(false),
         }
     }
 
-    fn set_thread_state_normal(&self) {
-        self.thread_free.fetch_and(!3, SeqCst);
-    }
-    fn set_thread_state_delayed(&self) {
-        self.thread_free.fetch_or(3, SeqCst);
-    }
-    /// Changes `self.thread_free` from `Delayed` to `Delaying`.
-    /// Doesn't do anything if `self.thread_free` isn't `Delayed`.
-    fn transition_to_delaying(&self) {
-        self.thread_free.fetch_and(1, SeqCst);
-    }
     fn thread_free(&self) -> (usize, ThreadFreeState, *mut FreeList) {
         let thread_free = self.thread_free.load(SeqCst);
         Self::split_thread_free(thread_free)
@@ -161,7 +148,7 @@ impl PageMeta {
 
 struct SegmentMeta {
     thread_id: u32,
-    page_kind: PageKind,
+    class: u8,
     used: UnsafeCell<u8>,
 }
 
@@ -171,6 +158,8 @@ struct Segment {
     pages: [MaybeUninit<PageMeta>; SEGMENT_SIZE / SMALL_PAGE_SIZE - 1],
     end_marker: (),
 }
+
+unsafe impl Sync for Segment {}
 
 const _: () = {
     assert!(
@@ -196,7 +185,7 @@ impl Segment {
         ((page as usize & !(SEGMENT_SIZE - 1)) + SMALL_PAGE_SIZE * (1 + Self::small_page_id(page)))
             as _
     }
-    fn block_small_page_id(block: *const u8) -> usize {
+    fn block_small_page_id(block: *const FreeList) -> usize {
         (block as usize & SEGMENT_SIZE - 1) / SMALL_PAGE_SIZE - 1
     }
 }
@@ -237,6 +226,8 @@ struct ThreadAllocator {
     delayed_free: AtomicPtr<FreeList>,
 }
 
+unsafe impl Sync for ThreadAllocator {}
+
 impl ThreadAllocator {
     pub fn new(thread_id: u32) -> Self {
         Self {
@@ -265,26 +256,26 @@ unsafe fn remove_page(page: &ThreadOwned<PageMeta>) {
     }
 }
 
-unsafe fn pop_page(list: &mut ThreadPagePtr) -> Option<&ThreadOwned<PageMeta>> {
-    let page = unsafe { list.as_mut()?.as_ref() };
-    *list = unsafe { *page.next.get() };
-    if let Some(page_next) = *list {
-        unsafe { *page_next.as_ref().prev_next.get() = list.into() };
-    }
-    Some(page)
-}
+// unsafe fn pop_page(list: &mut ThreadPagePtr) -> Option<&ThreadOwned<PageMeta>> {
+//     let page = unsafe { list.as_mut()?.as_ref() };
+//     *list = unsafe { *page.next.get() };
+//     if let Some(page_next) = *list {
+//         unsafe { *page_next.as_ref().prev_next.get() = list.into() };
+//     }
+//     Some(page)
+// }
 
 impl ThreadOwned<ThreadAllocator> {
     unsafe fn free_small_page(&self, page: &mut PageMeta) {
-        let free_pages = unsafe { &mut *self.free_small_pages.get() };
-        unsafe { push_page(free_pages, page.into()) };
-
         let seg = unsafe { ThreadOwned::from_ref(&*Segment::from_ptr(page)) };
         let seg_used = unsafe { &mut *seg.used.get() };
         *seg_used -= 1;
         if *seg_used == 0 {
             // Free segment
             todo!();
+        } else {
+            let free_pages = unsafe { &mut *self.free_small_pages.get() };
+            unsafe { push_page(free_pages, page.into()) };
         }
     }
 
@@ -316,7 +307,7 @@ impl ThreadOwned<ThreadAllocator> {
                 let segment = segment.write(Segment {
                     meta: SegmentMeta {
                         thread_id: self.thread_id,
-                        page_kind: PageKind::Small,
+                        class: class as _,
                         used: UnsafeCell::new(1),
                     },
                     pages: array::from_fn(|_| MaybeUninit::new(PageMeta::new(NonNull::dangling()))),
@@ -330,10 +321,8 @@ impl ThreadOwned<ThreadAllocator> {
             }
         };
 
-        let class_page = unsafe { &mut *self.pages[class].get() };
-        *free_small_pages = *page.next.get_mut();
-        *page.next.get_mut() = *class_page;
-        *class_page = Some(ThreadOwned::from_mut(page).into());
+        unsafe { remove_page(page.into()) };
+        unsafe { push_page(free_small_pages, page.into()) };
 
         let page_start = Segment::small_page_start(page as _);
 
@@ -356,7 +345,7 @@ impl ThreadOwned<ThreadAllocator> {
         let segment = segment.write(Segment {
             meta: SegmentMeta {
                 thread_id: self.thread_id,
-                page_kind: PageKind::Large,
+                class: class as _,
                 used: UnsafeCell::new(1),
             },
             pages: array::from_fn(|_| MaybeUninit::uninit()),
@@ -380,6 +369,22 @@ impl ThreadOwned<ThreadAllocator> {
         page
     }
 
+    unsafe fn local_free(
+        &self,
+        class: usize,
+        page: &ThreadOwned<PageMeta>,
+        mut free: NonNull<FreeList>,
+    ) {
+        if unsafe { page.is_full.get().replace(false) } {
+            unsafe { remove_page(page) };
+            unsafe { push_page(&mut *self.pages[class].get(), page) };
+        }
+
+        let local_free = unsafe { &mut *page.local_free.get() };
+        unsafe { free.as_mut().next = *local_free };
+        *local_free = free.as_ptr();
+    }
+
     pub unsafe fn alloc(&self, size: usize) -> *mut u8 {
         if *LARGE_SIZE_CLASSES.last().unwrap() < size {
             // huge allocation
@@ -398,15 +403,17 @@ impl ThreadOwned<ThreadAllocator> {
             }
         }
 
-        let mut delayed_free = NonNull::new(self.delayed_free.swap(ptr::null_mut(), SeqCst));
-        while let Some(free) = delayed_free {
+        let mut delayed_free = self.delayed_free.swap(ptr::null_mut(), SeqCst);
+        while let Some(free) = NonNull::new(delayed_free) {
+            delayed_free = unsafe { free.as_ref().next };
+
             let seg = unsafe { ThreadOwned::from_ref(&*Segment::from_ptr(free.as_ptr())) };
-            let _page_id = match seg.page_kind {
-                PageKind::Small => Segment::block_small_page_id(free.as_ptr() as _),
-                PageKind::Large => 0,
+            let page_id = match (seg.class as usize) < SMALL_SIZE_CLASSES.len() {
+                true => Segment::block_small_page_id(free.as_ptr() as _),
+                false => 0,
             };
-            (|| todo!())();
-            delayed_free = NonNull::new(unsafe { free.as_ref().next });
+            let page = unsafe { ThreadOwned::from_ref(seg.pages[page_id].assume_init_ref()) };
+            unsafe { self.local_free(seg.class as _, page, free) };
         }
 
         loop {
@@ -422,11 +429,19 @@ impl ThreadOwned<ThreadAllocator> {
                 .or_else(|| NonNull::new(unsafe { page.local_free.get().replace(ptr::null_mut()) }))
                 .or_else(|| {
                     page.thread_free
-                        .compare_exchange(0, ThreadFreeState::Delayed as _, SeqCst, SeqCst)
+                        .compare_exchange(
+                            ThreadFreeState::Normal as _,
+                            ThreadFreeState::Delayed as _,
+                            SeqCst,
+                            SeqCst,
+                        )
                         .err()
                         .map(|_| unsafe {
                             // SAFETY: We checked that it isn't zero and other threads won't zero it
-                            NonNull::new_unchecked(page.thread_free.swap(0, SeqCst) as _)
+                            NonNull::new_unchecked(
+                                (page.thread_free.swap(ThreadFreeState::Normal as _, SeqCst) & !7)
+                                    as _,
+                            )
                         })
                 }) {
                 Some(free) => unsafe {
@@ -436,6 +451,7 @@ impl ThreadOwned<ThreadAllocator> {
                 },
                 None => unsafe {
                     remove_page(page);
+                    *page.is_full.get() = true;
                     push_page(&mut *self.full_pages.get(), page);
                 },
             }
@@ -444,7 +460,7 @@ impl ThreadOwned<ThreadAllocator> {
 }
 
 struct Allocator {
-    thread_allocs: [UnsafeCell<ThreadAllocator>; 1],
+    thread_allocs: [ThreadAllocator; 1],
 }
 
 unsafe impl Sync for Allocator {}
@@ -453,9 +469,7 @@ unsafe impl Send for Allocator {}
 impl Allocator {
     pub fn new() -> Self {
         Self {
-            thread_allocs: array::from_fn(|thread_id| {
-                UnsafeCell::new(ThreadAllocator::new(thread_id as _))
-            }),
+            thread_allocs: array::from_fn(|thread_id| ThreadAllocator::new(thread_id as _)),
         }
     }
 }
@@ -466,43 +480,81 @@ unsafe impl GlobalAlloc for Allocator {
 
         // Get this thread's id
         unsafe {
-            ThreadOwned::from_ref(&*self.thread_allocs[thread_id].get())
-                .alloc(layout.pad_to_align().size())
+            ThreadOwned::from_ref(&self.thread_allocs[thread_id])
+                .alloc(layout.align_to(8).unwrap().pad_to_align().size())
         }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         let thread_id = 0;
 
-        let size = layout.pad_to_align().size();
+        let size = layout.align_to(8).unwrap().pad_to_align().size();
+        if *LARGE_SIZE_CLASSES.last().unwrap() < size {
+            todo!();
+        }
+
+        let ptr = unsafe { &mut *ptr.cast() };
+
         let seg = unsafe { &*Segment::from_ptr(ptr) };
-        let page_id = match seg.page_kind {
-            PageKind::Large => 0,
-            PageKind::Small => Segment::block_small_page_id(ptr),
+        let page_id = match (seg.class as usize) < SMALL_SIZE_CLASSES.len() {
+            true => Segment::block_small_page_id(ptr),
+            false => 0,
         };
         let page = unsafe { seg.pages[page_id].assume_init_ref() };
+
         if thread_id == seg.thread_id {
             let page = unsafe { ThreadOwned::from_ref(page) };
+            let local_free = unsafe { &mut *page.local_free.get() };
+            ptr.next = *local_free;
+            *local_free = ptr;
         } else {
             let (mut cur, mut state, mut thread_free) = page.thread_free();
-            'outer: loop {
+            let mut delaying_counter = 0;
+            loop {
                 match state {
                     ThreadFreeState::Normal => {
-                        let ptr = ptr as *mut FreeList;
-                        unsafe { (*ptr).next = thread_free };
-                        match page
-                            .thread_free
-                            .compare_exchange(cur, ptr as _, SeqCst, SeqCst)
-                        {
+                        ptr.next = thread_free;
+                        match page.thread_free.compare_exchange(
+                            cur,
+                            ptr as *mut _ as _,
+                            SeqCst,
+                            SeqCst,
+                        ) {
                             Ok(_) => break,
                             Err(new) => {
-                                (cur, state, thread_free) = PageMeta::split_thread_free(new)
+                                (cur, state, thread_free) = PageMeta::split_thread_free(new);
+                                continue;
                             }
                         }
                     }
-                    ThreadFreeState::Delaying => todo!(),
-                    ThreadFreeState::Delayed => loop {
-                        self.thread_allocs[seg.thread_id]
-                    },
+                    ThreadFreeState::Delaying if delaying_counter < 4 => {
+                        delaying_counter += 1;
+                        (cur, state, thread_free) = page.thread_free();
+                        continue;
+                    }
+                    ThreadFreeState::Delayed | ThreadFreeState::Delaying => {
+                        match page.thread_free.compare_exchange(
+                            cur,
+                            ThreadFreeState::Delaying as _,
+                            SeqCst,
+                            SeqCst,
+                        ) {
+                            Ok(_) => {
+                                let alloc = &self.thread_allocs[seg.thread_id as usize];
+                                ptr.next = alloc.delayed_free.load(SeqCst);
+                                while let Err(new_next) = (alloc.delayed_free)
+                                    .compare_exchange(ptr.next, ptr, SeqCst, SeqCst)
+                                {
+                                    ptr.next = new_next;
+                                }
+                                page.thread_free.store(ThreadFreeState::Normal as _, SeqCst);
+                                break;
+                            }
+                            Err(new) => {
+                                (cur, state, thread_free) = PageMeta::split_thread_free(new);
+                                continue;
+                            }
+                        }
+                    }
                 }
             }
         }

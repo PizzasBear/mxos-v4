@@ -5,11 +5,12 @@
 extern crate alloc;
 
 pub mod bitmap;
-pub mod buddy;
 pub mod malloc;
 pub mod memory;
+pub mod pmm;
 pub mod psf;
 pub mod serial;
+pub mod vmm;
 
 use core::{mem, slice};
 
@@ -19,7 +20,7 @@ use spin::Lazy;
 use psf::PsfFile;
 use x86_64::{PhysAddr, VirtAddr};
 
-use crate::buddy::BuddyAllocator;
+use crate::pmm::BuddyAllocator;
 
 pub const BOOTLOADER_CONFIG: BootloaderConfig = {
     let mut config = BootloaderConfig::new_default();
@@ -68,7 +69,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         {
             buddy_map_start = start;
             let buddy_map_ptr = (mapper.phys_offset() + start).as_mut_ptr();
-            allocator = Some(BuddyAllocator::new(memory_size as _, mapper, unsafe {
+            allocator = Some(BuddyAllocator::new(memory_size as _, &mapper, unsafe {
                 slice::from_raw_parts_mut(buddy_map_ptr, buddy_map_len)
             }));
             break;

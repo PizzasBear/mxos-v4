@@ -4,7 +4,7 @@ use core::{array, ops, ptr::NonNull};
 
 use x86_64::{
     structures::paging::{
-        FrameAllocator, FrameDeallocator, OffsetPageTable, PageSize, PhysFrame, Size4KiB,
+        FrameAllocator, FrameDeallocator, OffsetPageTable, PageSize, PhysFrame, Size2MiB, Size4KiB,
     },
     PhysAddr, VirtAddr,
 };
@@ -140,7 +140,7 @@ impl<'a> ops::DerefMut for Buddies<'a> {
 
 pub struct BuddyAllocator<'a> {
     buddies: Buddies<'a>,
-    page_table: OffsetPageTable<'a>,
+    phys_offset: VirtAddr,
 }
 
 impl<'a> BuddyAllocator<'a> {
@@ -162,7 +162,7 @@ impl<'a> BuddyAllocator<'a> {
 
     pub fn new(
         memory_size: usize,
-        page_table: OffsetPageTable<'a>,
+        page_table: &OffsetPageTable,
         mut buddy_map: &'a mut [usize],
     ) -> Self {
         assert!(Self::buddy_map_len(memory_size) <= buddy_map.len());
@@ -192,7 +192,7 @@ impl<'a> BuddyAllocator<'a> {
 
         Self {
             buddies: Buddies(buddies),
-            page_table,
+            phys_offset: page_table.phys_offset(),
         }
     }
 
@@ -246,13 +246,12 @@ impl<'a> BuddyAllocator<'a> {
             pair /= 2;
             buddy.toggle_chunk_pair(pair);
             if buddy.is_chunk_pair_different(pair) {
-                unsafe { buddy.push_free_list(self.page_table.phys_offset() + addr.as_u64()) };
+                unsafe { buddy.push_free_list(self.phys_offset + addr.as_u64()) };
                 return;
             }
         }
         unsafe {
-            (self.buddies.last_mut().unwrap())
-                .push_free_list(self.page_table.phys_offset() + addr.as_u64());
+            (self.buddies.last_mut().unwrap()).push_free_list(self.phys_offset + addr.as_u64());
         }
     }
 
@@ -265,7 +264,7 @@ impl<'a> BuddyAllocator<'a> {
             let Some(addr) = buddy.pop_free_list() else {
                 continue;
             };
-            let addr = PhysAddr::new(addr - self.page_table.phys_offset());
+            let addr = PhysAddr::new(addr - self.phys_offset);
 
             for (buddy_order, buddy) in (order..).zip(&mut self.buddies[order..=buddy_order]) {
                 buddy.toggle_chunk_pair((addr.as_u64() >> buddy_order + 1) as _);
@@ -286,5 +285,17 @@ unsafe impl FrameAllocator<Size4KiB> for BuddyAllocator<'_> {
 impl FrameDeallocator<Size4KiB> for BuddyAllocator<'_> {
     unsafe fn deallocate_frame(&mut self, frame: PhysFrame) {
         self.free(12, frame.start_address());
+    }
+}
+
+unsafe impl FrameAllocator<Size2MiB> for BuddyAllocator<'_> {
+    fn allocate_frame(&mut self) -> Option<PhysFrame<Size2MiB>> {
+        Some(PhysFrame::from_start_address(self.alloc(21)?).unwrap())
+    }
+}
+
+impl FrameDeallocator<Size2MiB> for BuddyAllocator<'_> {
+    unsafe fn deallocate_frame(&mut self, frame: PhysFrame<Size2MiB>) {
+        self.free(21, frame.start_address());
     }
 }
