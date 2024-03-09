@@ -29,6 +29,7 @@ impl SizeAddr {
     }
 }
 
+#[derive(Debug)]
 struct TreeBestFitAlloc {
     addr_size_tree: BTreeMap<usize, usize>,
     size_addr_tree: BTreeSet<SizeAddr>,
@@ -116,6 +117,17 @@ pub struct VirtualMemoryManager<'a> {
     kernel_start: VirtAddr,
 }
 
+impl<'a> fmt::Debug for VirtualMemoryManager<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VirtualMemoryManager")
+            // .field("frame_allocator", &self.frame_allocator)
+            .field("kernel_alloc", &self.kernel_alloc)
+            .field("user_alloc", &self.user_alloc)
+            .field("kernel_start", &self.kernel_start)
+            .finish()
+    }
+}
+
 impl<'a> VirtualMemoryManager<'a> {
     pub fn new(
         kernel_start: VirtAddr,
@@ -155,7 +167,12 @@ impl<'a> VirtualMemoryManager<'a> {
             true => self.kernel_alloc.alloc(size, align_order),
             false => self.user_alloc.alloc(size, align_order),
         }?;
-        let mut addr = VirtAddr::new(addr as _);
+        let return_addr = VirtAddr::new(addr as _);
+        let mut addr = return_addr;
+        log::info!(
+            "VMM_BEGIN_ALLOC: addr={return_addr:?} layout={:?} kernel={kernel}",
+            core::alloc::Layout::from_size_align(size, 1 << align_order),
+        );
 
         let mut page_flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
         page_flags.set(PageTableFlags::USER_ACCESSIBLE, !kernel);
@@ -178,7 +195,12 @@ impl<'a> VirtualMemoryManager<'a> {
             size -= PAGE_SIZE;
         }
 
-        Some(addr)
+        log::info!(
+            "VMM_END_ALLOC: addr={return_addr:?} layout={:?} kernel={kernel}",
+            core::alloc::Layout::from_size_align(size, 1 << align_order),
+        );
+
+        Some(return_addr)
     }
 
     pub fn free(&mut self, mut addr: VirtAddr, mut size: usize) {
@@ -262,7 +284,9 @@ pub fn init(
                 // );
                 alloc.free(start.as_u64() as _, size);
             }
-            if entry.flags().contains(PageTableFlags::HUGE_PAGE) {
+            if entry.flags().contains(PageTableFlags::HUGE_PAGE)
+                || !entry.flags().contains(PageTableFlags::PRESENT)
+            {
                 continue;
             }
             if let Some(level) = level.next_lower_level() {
@@ -361,4 +385,5 @@ pub fn init(
 
         spin::Mutex::new(vmm)
     });
+    ALLOC.vmm.call_once(|| VMM.get().unwrap());
 }

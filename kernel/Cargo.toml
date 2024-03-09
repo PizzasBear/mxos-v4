@@ -23,3 +23,6 @@ log = "0.4"
 bitflags = "2.4"
 bytemuck = { version = "1.14", features = ["derive"] }
 heapless = "0.8"
+itertools = { version = "0.12", default-features = false, features = [
+    "use_alloc",
+] }

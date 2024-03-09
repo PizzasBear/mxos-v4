@@ -107,6 +107,7 @@ enum ThreadFreeState {
     Delayed = 3,
 }
 
+#[derive(Debug)]
 struct PageMeta {
     next: UnsafeCell<ThreadPagePtr>,
     prev_next: UnsafeCell<NonNull<ThreadPagePtr>>,
@@ -154,6 +155,7 @@ impl PageMeta {
     }
 }
 
+#[derive(Debug)]
 struct SegmentMeta {
     thread_id: u32,
     class: Option<NonZeroU8>,
@@ -243,6 +245,7 @@ struct FreeList {
 
 type ThreadPagePtr = Option<NonNull<ThreadOwned<PageMeta>>>;
 
+#[derive(Debug)]
 struct ThreadAllocator {
     thread_id: u32,
     /// Accessed only locally
@@ -380,7 +383,7 @@ impl ThreadOwned<ThreadAllocator> {
         unsafe { remove_page(page.into()) };
         unsafe { push_page(&mut *self.pages[class].get(), page.into()) };
 
-        let page_start = Segment::small_page_start(page as _);
+        let page_start: *mut u8 = Segment::small_page_start(page as _);
 
         // page.capacity = SMALL_PAGE_SIZE as u32 / SMALL_SIZE_CLASSES[class] as u32;
 
@@ -403,6 +406,10 @@ impl ThreadOwned<ThreadAllocator> {
         class: usize,
     ) -> Option<&mut PageMeta> {
         let large_class = class - SMALL_SIZE_CLASSES.len();
+        log::info!(
+            "ALLOC_LARGE_PAGE: {free_segments:?} class={class} size={}",
+            LARGE_SIZE_CLASSES[large_class]
+        );
         let segment = unsafe { free_segments.pop()?.as_mut() };
 
         let segment = unsafe {
@@ -423,7 +430,7 @@ impl ThreadOwned<ThreadAllocator> {
         for offset in (LARGE_SIZE_CLASS_PAGE_STARTS[large_class]..SEGMENT_SIZE)
             .step_by(LARGE_SIZE_CLASSES[large_class])
         {
-            let node: *mut FreeList = unsafe { seg_ptr.add(offset).cast() };
+            let node: *mut FreeList = unsafe { seg_ptr.byte_add(offset).cast() };
             unsafe { node.write(FreeList { next: *free }) };
             *free = node.cast();
         }
@@ -460,11 +467,6 @@ impl ThreadOwned<ThreadAllocator> {
             }
         }
 
-        // log::info!(
-        //     "Slow path {free_segments:?} class={class} size={}",
-        //     SMALL_SIZE_CLASSES[class],
-        // );
-
         let mut delayed_free = self.delayed_free.swap(ptr::null_mut(), SeqCst);
         while let Some(free) = NonNull::new(delayed_free) {
             delayed_free = unsafe { free.as_ref().next };
@@ -477,11 +479,6 @@ impl ThreadOwned<ThreadAllocator> {
             let page = unsafe { ThreadOwned::from_ref(seg.pages()[page_id].assume_init_ref()) };
             unsafe { self.local_free(page.class as _, page, free) };
         }
-
-        // log::info!(
-        //     "Yey delay free {free_segments:?} class={class} size={}",
-        //     SMALL_SIZE_CLASSES[class],
-        // );
 
         loop {
             let Some(page) = (unsafe {
@@ -496,11 +493,6 @@ impl ThreadOwned<ThreadAllocator> {
             }) else {
                 return ptr::null_mut();
             };
-
-            // log::info!(
-            //     "Do the free thing {free_segments:?} class={class} size={}",
-            //     SMALL_SIZE_CLASSES[class],
-            // );
 
             match NonNull::new(unsafe { *page.free.get() })
                 .or_else(|| NonNull::new(unsafe { page.local_free.get().replace(ptr::null_mut()) }))
@@ -522,19 +514,11 @@ impl ThreadOwned<ThreadAllocator> {
                         })
                 }) {
                 Some(free) => unsafe {
-                    // log::info!(
-                    //     "done done {free_segments:?} class={class} size={}",
-                    //     SMALL_SIZE_CLASSES[class],
-                    // );
                     *page.used.get() += 1;
                     *page.free.get() = free.as_ref().next;
                     break free.as_ptr() as _;
                 },
                 None => unsafe {
-                    // log::info!(
-                    //     "no free? {free_segments:?} class={class} size={}",
-                    //     SMALL_SIZE_CLASSES[class],
-                    // );
                     remove_page(page);
                     *page.is_full.get() = true;
                     push_page(&mut *self.full_pages.get(), page);
@@ -586,10 +570,11 @@ impl FreeSegments {
     }
 }
 
+#[derive(Debug)]
 pub struct Allocator {
     pub free_segments: FreeSegments,
     thread_allocs: [ThreadAllocator; 1],
-    vmm: spin::Once<&'static spin::Mutex<VirtualMemoryManager<'static>>>,
+    pub vmm: spin::Once<&'static spin::Mutex<VirtualMemoryManager<'static>>>,
 }
 
 unsafe impl Sync for Allocator {}
@@ -610,26 +595,61 @@ impl Allocator {
 
 unsafe impl GlobalAlloc for Allocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let vmm = self.vmm.get().and_then(|vmm| vmm.try_lock());
+        let vmm = || self.vmm.get().and_then(|vmm| vmm.try_lock());
 
         let size = layout.align_to(8).unwrap().pad_to_align().size();
         if *LARGE_SIZE_CLASSES.last().unwrap() < size {
-            let Some(mut vmm) = vmm else {
+            let Some(mut vmm) = vmm() else {
+                log::info!("ALLOC_HUGE: Failed to acquire vmm lock");
                 return ptr::null_mut();
             };
+            log::info!("ALLOC_HUGE: layout={layout:?} size=0x{size:x}");
             return vmm
                 .alloc(true, layout.size(), layout.align().trailing_zeros() as _)
                 .map_or(ptr::null_mut(), |addr| addr.as_mut_ptr());
         }
 
-        if let Some(mut vmm) = vmm {
-            while self.free_segments.len.load(SeqCst) < 4 {
-                let list = vmm
+        log::info!("ALLOC: layout={layout:?} size=0x{size:x}");
+
+        'alloc_segments: {
+            if 3 < self.free_segments.len() {
+                break 'alloc_segments;
+            }
+            let Some(mut vmm) = vmm() else {
+                log::info!(
+                    "ALLOC_SEGMENTS: Failed to acquire vmm lock: \
+                     layout={layout:?} free_segments_len={} vmm={:?}",
+                    self.free_segments.len(),
+                    self.vmm,
+                );
+                break 'alloc_segments;
+            };
+            loop {
+                log::info!(
+                    "ALLOC_SEGMENTS: Let's alloc one \
+                     layout={layout:?} free_segments_len={} vmm={vmm:#?}",
+                    self.free_segments.len(),
+                );
+                let list: *mut Segment = vmm
                     .alloc(true, SEGMENT_SIZE, SEGMENT_SIZE.trailing_zeros() as _)
                     .unwrap()
                     .as_mut_ptr();
+                log::info!(
+                    "ALLOC_SEGMENTS: We did an alloc \
+                     layout={layout:?} free_segments_len={}",
+                    self.free_segments.len(),
+                );
 
                 unsafe { self.free_segments.push(list) };
+                log::info!(
+                    "ALLOC_SEGMENTS: We pushed an alloc \
+                     layout={layout:?} free_segments_len={}",
+                    self.free_segments.len(),
+                );
+
+                if 3 < self.free_segments.len() {
+                    break;
+                }
             }
         }
 
@@ -649,9 +669,11 @@ unsafe impl GlobalAlloc for Allocator {
         result
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        log::info!("DEALLOC: ptr={ptr:p} layout={layout:?}");
         let size = layout.align_to(8).unwrap().pad_to_align().size();
         if *LARGE_SIZE_CLASSES.last().unwrap() < size {
             let Some(mut vmm) = self.vmm.get().and_then(|vmm| vmm.try_lock()) else {
+                log::info!("DEALLOC_HUGE: Failed to acquire vmm lock");
                 return;
             };
             return vmm.free(VirtAddr::from_ptr(ptr), layout.size());

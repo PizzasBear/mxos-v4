@@ -1,6 +1,27 @@
-use core::mem;
+use core::{fmt, mem};
+
+use itertools::Itertools;
 
 pub struct Bitmap<T: AsRef<[usize]> + ?Sized = [usize]>(pub T);
+
+impl<T: AsRef<[usize]> + ?Sized> fmt::Debug for Bitmap<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let slice = self.0.as_ref();
+
+        f.debug_tuple("Bitmap")
+            .field(&format_args!(
+                "0x{}{}",
+                slice[..slice.len().min(4)]
+                    .iter()
+                    .format_with("_", |&x, f| f(&format_args!("{:016x}", x))),
+                match slice.len() {
+                    5.. => "...",
+                    _ => "",
+                }
+            ))
+            .finish()
+    }
+}
 
 impl Bitmap {
     pub fn from_slice(slice: &[usize]) -> &Self {

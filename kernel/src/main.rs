@@ -14,7 +14,7 @@ pub mod vmm;
 
 use core::{mem, slice};
 
-use alloc::boxed::Box;
+use alloc::{boxed::Box, vec::Vec};
 use bootloader_api::{entry_point, info::MemoryRegionKind, BootInfo, BootloaderConfig};
 
 // use psf::PsfFile;
@@ -110,7 +110,20 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     log::info!("DONE");
 
-    log::info!("ALLOC WORKS: {}", Box::new(5));
+    let x = Box::new(5);
+    log::info!("ALLOC WORKS: {}", x);
+    drop(x);
+    log::info!("DEALLOC WORKS");
+
+    let v = (0..2048).collect::<Vec<u64>>();
+    log::info!("Large WORKS: {}", v.len());
+    drop(v);
+    log::info!("Large DEALLOC WORKS");
+
+    let v = (0..1 << 17).collect::<Vec<u64>>();
+    log::info!("HUGE WORKS: {}", v.len());
+    drop(v);
+    log::info!("HUGE DEALLOC WORKS");
 
     loop {
         x86_64::instructions::hlt();

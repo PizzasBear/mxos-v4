@@ -15,6 +15,7 @@ struct FreeList {
     next: Option<NonNull<Self>>,
 }
 
+#[derive(Debug)]
 struct Buddy<'a> {
     // top_level: bool,
     // phys_offset: usize,
@@ -87,6 +88,7 @@ const ORDERS: ops::Range<u8> = 12..22;
 // const MIN_ORDER: u8 = 21;
 // const MAX_ORDER: u8 = 30;
 
+#[derive(Debug)]
 struct Buddies<'a>([Buddy<'a>; (ORDERS.end - ORDERS.start) as _]);
 
 impl<'a> ops::Index<(ops::Bound<u8>, ops::Bound<u8>)> for Buddies<'a> {
@@ -140,6 +142,7 @@ impl<'a> ops::DerefMut for Buddies<'a> {
     }
 }
 
+#[derive(Debug)]
 pub struct BuddyAllocator<'a> {
     buddies: Buddies<'a>,
     phys_offset: VirtAddr,
@@ -258,7 +261,9 @@ impl<'a> BuddyAllocator<'a> {
     }
 
     pub fn alloc(&mut self, order: u8) -> Option<PhysAddr> {
-        log::info!("alloc: order={order}");
+        if 12 < order {
+            log::info!("alloc: order={order}");
+        }
 
         assert!(ORDERS.contains(&order));
 
