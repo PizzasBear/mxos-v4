@@ -1,7 +1,11 @@
-use core::{cmp::Ordering, fmt, mem, ops, str};
+use core::{cmp::Ordering, fmt, iter::FusedIterator, str};
+
+mod ucs2;
+
+use ucs2::Ucs2Str;
 
 // should be less than (255 / 4)
-const MAX_UNICODE_CHAR_NUM: usize = 4;
+// const MAX_UNICODE_CHAR_NUM: usize = 4;
 
 #[derive(Debug)]
 pub enum Error {
@@ -9,8 +13,8 @@ pub enum Error {
     UnknownPsf2Version(u32),
     InvalidMagic,
     InvalidGlyphSize,
-    EmptyUnicodeTableEntry,
-    UnicodeTooLong,
+    // EmptyUnicodeTableEntry,
+    // UnicodeTooLong,
     Utf8Error(str::Utf8Error),
     Ucs2Error,
     UnexpectedUnicodeTable,
@@ -29,21 +33,21 @@ impl fmt::Display for Error {
             Self::InvalidGlyphSize => {
                 write!(f, "The provided PSF2 glyph size doesn't equal the calculated size (`height * ((width + 7) / 8)`)")
             }
-            Self::UnicodeTooLong => {
-                write!(
-                    f,
-                    "A glyph's unicode string cannot be longer {MAX_UNICODE_CHAR_NUM} characters",
-                )
-            }
+            // Self::UnicodeTooLong => {
+            //     write!(
+            //         f,
+            //         "A glyph's unicode string cannot be longer {MAX_UNICODE_CHAR_NUM} characters",
+            //     )
+            // }
             Self::Utf8Error(err) => {
                 write!(f, "Unicode table UTF-8 string parsing errored: {err}")
             }
             Self::Ucs2Error => {
                 write!(f, "Unicode table UCS-2 LE string parsing errored")
             }
-            Self::EmptyUnicodeTableEntry => {
-                write!(f, "Unicode table entry is empty")
-            }
+            // Self::EmptyUnicodeTableEntry => {
+            //     write!(f, "Unicode table entry is empty")
+            // }
             Self::UnexpectedUnicodeTable => {
                 write!(f, "Encountered an unexpected unicode table")
             }
@@ -71,18 +75,7 @@ pub enum PsfVersion {
     Psf2,
 }
 
-// #[derive(Debug, Default, Clone, Copy)]
-// pub struct CacheEntry {
-//     pos: usize,
-//     glyph: u32,
-// }
-
-// struct Cache<const N: usize> {
-//     max_lens: [u8; 255],
-//     map: [CacheEntry; N],
-// }
-
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct PsfFile<'a> {
     raw_bytes: &'a [u8],
     version: PsfVersion,
@@ -96,151 +89,18 @@ pub struct PsfFile<'a> {
     longest_glyph: u8,
 }
 
-pub struct UnicodeTableEntries<'a> {
-    file: &'a PsfFile<'a>,
-    entry: u32,
-    index: usize,
-}
-
-pub struct Ucs2Str<T: ?Sized = [u8]>(T);
-
-impl Ucs2Str {
-    pub const EMPTY: &'static Self = &Ucs2Str([]);
-
-    fn verify(bytes: &[u8]) -> bool {
-        bytes.chunks(2).all(|c| {
-            char::from_u32(u16::from_le_bytes(match c.try_into() {
-                Ok(b) => b,
-                Err(_) => return false,
-            }) as _)
-            .is_some()
-        })
-    }
-    pub fn from_bytes(bytes: &[u8]) -> Option<&Self> {
-        match Self::verify(bytes) {
-            true => Some(unsafe { Self::from_bytes_unchecked(bytes) }),
-            false => None,
-        }
-    }
-    pub fn from_bytes_mut(bytes: &mut [u8]) -> Option<&mut Self> {
-        match Self::verify(bytes) {
-            true => Some(unsafe { Self::from_bytes_mut_unchecked(bytes) }),
-            false => None,
-        }
-    }
-    pub unsafe fn from_bytes_unchecked(bytes: &[u8]) -> &Self {
-        unsafe { mem::transmute(bytes) }
-    }
-    pub unsafe fn from_bytes_mut_unchecked(bytes: &mut [u8]) -> &mut Self {
-        unsafe { mem::transmute(bytes) }
-    }
-
-    pub fn len(&self) -> usize {
-        self.0.len() / 2
-    }
-
-    pub fn get(&self, index: usize) -> Option<char> {
-        unsafe {
-            Some(char::from_u32_unchecked(u16::from_le_bytes(
-                self.0
-                    .get(2 * index..2 * index + 2)?
-                    .try_into()
-                    .unwrap_unchecked(),
-            ) as _))
-        }
-    }
-
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl<'a> TryFrom<&'a [u8]> for &'a Ucs2Str {
-    type Error = ();
-    fn try_from(bytes: &'a [u8]) -> Result<Self, ()> {
-        Ucs2Str::from_bytes(bytes).ok_or(())
-    }
-}
-impl<'a> TryFrom<&'a mut [u8]> for &'a mut Ucs2Str {
-    type Error = ();
-    fn try_from(bytes: &'a mut [u8]) -> Result<Self, ()> {
-        Ucs2Str::from_bytes_mut(bytes).ok_or(())
-    }
-}
-
-impl<R: ops::RangeBounds<usize>> ops::Index<R> for Ucs2Str {
-    type Output = Self;
-
-    fn index(&self, range: R) -> &Self {
-        let start = match range.start_bound() {
-            ops::Bound::Included(start) => 2 * start,
-            ops::Bound::Excluded(start) => 2 * (start + 1),
-            ops::Bound::Unbounded => 0,
-        };
-        let end = match range.end_bound() {
-            ops::Bound::Included(_) => todo!(),
-            ops::Bound::Excluded(_) => todo!(),
-            ops::Bound::Unbounded => self.0.len(),
-        };
-        unsafe { mem::transmute(&self.0[start..end]) }
-    }
-}
-
-pub enum UnicodeTableEntryValue<'a> {
-    Utf8(&'a str),
-    Ucs2(&'a Ucs2Str),
-}
-
-pub struct UnicodeTableEntry<'a> {
-    pub entry: u32,
-    pub value: UnicodeTableEntryValue<'a>,
-}
-
-impl<'a> Iterator for UnicodeTableEntries<'a> {
-    type Item = UnicodeTableEntry<'a>;
-    fn next(&mut self) -> Option<Self::Item> {
-        const ERROR_MSG: &str = "PSF unicode table is invalid";
-
-        if self.index == self.file.raw_bytes.len() {
-            return None;
-        }
-
-        let (entry, str_start) = (self.entry, self.index);
-        let str_end;
-        match self.file.version {
-            PsfVersion::Psf1 => {
-                str_end = 2 * self.file.raw_bytes[self.index..]
-                    .chunks(2)
-                    .position(|ch| matches!(ch, [0xFF | 0xFE, 0xFF]))
-                    .expect(ERROR_MSG);
-                self.index = str_end + 2;
-            }
-            PsfVersion::Psf2 => {
-                str_end = self.file.raw_bytes[self.index..]
-                    .iter()
-                    .position(|&ch| 0xFD < ch)
-                    .expect(ERROR_MSG);
-                self.index = str_end + 1;
-            }
-        }
-        if self.file.raw_bytes[str_end] == 0xFF {
-            self.entry += 1;
-        }
-        let bytes = &self.file.raw_bytes[str_start..str_end];
-        if bytes.is_empty() {
-            panic!("{ERROR_MSG}");
-        }
-        Some(UnicodeTableEntry {
-            entry,
-            value: match self.file.version {
-                PsfVersion::Psf1 => {
-                    UnicodeTableEntryValue::Ucs2(Ucs2Str::from_bytes(bytes).expect(ERROR_MSG))
-                }
-                PsfVersion::Psf2 => {
-                    UnicodeTableEntryValue::Utf8(str::from_utf8(bytes).expect(ERROR_MSG))
-                }
-            },
-        })
+impl fmt::Debug for PsfFile<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PsfFile")
+            .field("version", &self.version)
+            .field("header_size", &self.header_size)
+            .field("has_unicode_table", &self.has_unicode_table)
+            .field("glyph_size", &self.glyph_size)
+            .field("glyph_width", &self.glyph_width)
+            .field("glyph_height", &self.glyph_height)
+            .field("num_glyphs", &self.num_glyphs)
+            .field("longest_glyph", &self.longest_glyph)
+            .finish()
     }
 }
 
@@ -280,25 +140,28 @@ impl<'a> PsfFile<'a> {
 
     pub fn parse2(bytes: &'a [u8]) -> Result<Self> {
         let header_bytes = bytes.get(..32).ok_or(Error::UnexpectedEnd)?;
-        let header_nums: &[u32; 8] =
-            bytemuck::cast_ref(<&[u8; 32]>::try_from(header_bytes).unwrap());
-        if header_nums[0] != 0x864ab572 {
+        let header_num = {
+            let header_nums: &[u8; 32] = header_bytes.try_into().unwrap();
+            |i: usize| u32::from_le_bytes(header_nums[4 * i..4 * i + 4].try_into().unwrap())
+        };
+
+        if header_num(0) != 0x864ab572 {
             return Err(Error::InvalidMagic);
         }
-        if header_nums[1] != 0 {
-            return Err(Error::UnknownPsf2Version(header_nums[1]));
+        if header_num(1) != 0 {
+            return Err(Error::UnknownPsf2Version(header_num(1)));
         }
         let mut slf = Self {
             raw_bytes: bytes,
             version: PsfVersion::Psf2,
-            header_size: header_nums[2].max(32),
-            has_unicode_table: header_nums[3] & 1 != 0,
-            num_glyphs: header_nums[4],
-            glyph_height: header_nums[6],
-            glyph_width: header_nums[7],
+            header_size: header_num(2).max(32),
+            has_unicode_table: header_num(3) & 1 != 0,
+            num_glyphs: header_num(4),
+            glyph_height: header_num(6),
+            glyph_width: header_num(7),
             glyph_size: {
-                let size = header_nums[6] * ((header_nums[7] + 7) / 8);
-                if header_nums[5] != size {
+                let size = header_num(6) * ((header_num(7) + 7) / 8);
+                if header_num(5) != size {
                     return Err(Error::InvalidGlyphSize);
                 }
                 size
@@ -319,11 +182,12 @@ impl<'a> PsfFile<'a> {
         }
     }
 
-    pub fn unicode_table_start(&self) -> usize {
+    fn unicode_table_start(&self) -> usize {
         self.header_size as usize + self.num_glyphs as usize * self.glyph_size as usize
     }
 
     fn process_unicode_table(&mut self) -> Result<()> {
+        log::info!("I AM {self:#?}");
         let table_start = self.unicode_table_start();
         if !self.has_unicode_table {
             return match self.raw_bytes.len().cmp(&table_start) {
@@ -341,9 +205,9 @@ impl<'a> PsfFile<'a> {
                 for ch in self.raw_bytes[table_start..].chunks(2) {
                     match u16::from_le_bytes(ch.try_into().map_err(|_| Error::Ucs2Error)?) {
                         n @ (0xFFFE | 0xFFFF) => {
-                            if len == 0 {
-                                return Err(Error::EmptyUnicodeTableEntry);
-                            }
+                            // if len == 0 {
+                            //     return Err(Error::EmptyUnicodeTableEntry);
+                            // }
                             num_entries += n as usize & 1;
                             max = max.max(len);
                             len = 0;
@@ -362,9 +226,9 @@ impl<'a> PsfFile<'a> {
                         return Err(Error::UnterminatedUnicodeTable);
                     };
                     let len = str::from_utf8(s).map_err(Error::Utf8Error)?.chars().count();
-                    if len == 0 {
-                        return Err(Error::EmptyUnicodeTableEntry);
-                    }
+                    // if len == 0 {
+                    //     return Err(Error::EmptyUnicodeTableEntry);
+                    // }
                     max = max.max(len);
                     num_entries += sep as usize & 1;
                 }
@@ -379,35 +243,203 @@ impl<'a> PsfFile<'a> {
                 num_entries,
             });
         }
-        if MAX_UNICODE_CHAR_NUM < max {
-            return Err(Error::UnicodeTooLong);
-        }
+        // if MAX_UNICODE_CHAR_NUM < max {
+        //     return Err(Error::UnicodeTooLong);
+        // }
         self.longest_glyph = max as _;
 
         Ok(())
     }
 
-    pub fn unicode_table_entries(&self) -> UnicodeTableEntries {
+    pub fn unicode_table_entries(&self) -> UnicodeTableEntries<'a> {
         UnicodeTableEntries {
-            file: self,
-            entry: 0,
+            version: self.version,
+            raw_bytes: self.raw_bytes,
+            entry_index: 0,
             index: self.unicode_table_start(),
         }
     }
 
-    pub fn find_glyph(&self, s: &str) -> Option<usize> {
-        let _table = &self.raw_bytes[self.unicode_table_start()..];
+    pub fn get_glyph(&self, entry: u32) -> Option<Glyph<'a>> {
+        let start = (self.header_size + entry * self.glyph_size) as usize;
+        let bytes = self
+            .raw_bytes
+            .get(start..start + self.glyph_size as usize)?;
+        Some(Glyph {
+            bytes,
+            width: self.glyph_width,
+        })
+    }
+}
 
-        let substr = &s[..s
-            .char_indices()
-            .take(self.longest_glyph as _)
-            .last()
-            .map(|(i, ch)| i + ch.len_utf8())?];
+pub struct Glyph<'a> {
+    pub bytes: &'a [u8],
+    pub width: u32,
+}
 
-        for (i, ch) in substr.char_indices().rev() {
-            let _substr = &substr[..i + ch.len_utf8()];
+#[derive(Debug, Clone)]
+pub struct GlyphRowIter<'a> {
+    bytes: &'a [u8],
+    indices: u8,
+}
+
+impl<'a> GlyphRowIter<'a> {
+    fn split_indices(&self) -> (u8, u8) {
+        (self.indices & 7, self.indices >> 4)
+    }
+}
+
+impl<'a> Iterator for GlyphRowIter<'a> {
+    type Item = bool;
+    fn next(&mut self) -> Option<bool> {
+        let (first, rest) = self.bytes.split_first()?;
+        let (start, end) = self.split_indices();
+        if self.bytes.len() <= 1 && end < start {
+            self.bytes = &[];
+            return None;
         }
 
-        todo!()
+        if start == 7 {
+            self.bytes = rest;
+            self.indices ^= 7;
+        } else {
+            self.indices += 1;
+        }
+        Some(first >> 7 - start & 1 != 0)
+    }
+
+    fn nth(&mut self, n: usize) -> Option<bool> {
+        self.bytes = &self.bytes[self.bytes.len().min(n / 8 + 1)..];
+        self.indices += (n % 8) as u8;
+        if self.indices & 8 != 0 {
+            self.bytes = self.bytes.get(1..).unwrap_or(&[]);
+            self.indices ^= 8;
+        }
+        self.next()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = self.bytes.len();
+        let (start, end) = self.split_indices();
+        let len = 8 * len - start as usize + end as usize - 8;
+        (len, Some(len))
+    }
+
+    fn count(self) -> usize {
+        self.size_hint().0
+    }
+}
+
+impl ExactSizeIterator for GlyphRowIter<'_> {}
+impl FusedIterator for GlyphRowIter<'_> {}
+
+impl<'a> DoubleEndedIterator for GlyphRowIter<'a> {
+    fn next_back(&mut self) -> Option<bool> {
+        let (last, rest) = self.bytes.split_last()?;
+        let (start, end) = self.split_indices();
+        if self.bytes.len() <= 1 && end < start {
+            self.bytes = &[];
+            return None;
+        }
+
+        if end == 0 {
+            self.bytes = rest;
+            self.indices ^= 0x70;
+        } else {
+            self.indices -= 0x10;
+        }
+        Some(last >> 7 - end & 1 != 0)
+    }
+
+    fn nth_back(&mut self, n: usize) -> Option<bool> {
+        self.bytes = &self.bytes[..self.bytes.len().saturating_sub(n / 8)];
+        self.indices -= (n % 8 << 4) as u8;
+        if self.indices & 0x80 != 0 {
+            self.bytes = &self.bytes[..self.bytes.len().saturating_sub(1)];
+            self.indices ^= 0x80;
+        }
+        self.next_back()
+    }
+}
+
+impl<'a> Glyph<'a> {
+    pub fn rows(
+        &self,
+    ) -> impl 'a
+           + Iterator<Item = GlyphRowIter<'a>>
+           + DoubleEndedIterator
+           + FusedIterator
+           + ExactSizeIterator {
+        let indices = ((self.width + 7) % 8 << 4) as _;
+        self.bytes
+            .chunks((self.width + 7 >> 3) as _)
+            .map(move |bytes| GlyphRowIter { bytes, indices })
+    }
+}
+
+pub struct UnicodeTableEntries<'a> {
+    raw_bytes: &'a [u8],
+    version: PsfVersion,
+    entry_index: u32,
+    index: usize,
+}
+
+#[derive(Debug, Clone, Copy, Hash)]
+pub enum UnicodeTableEntryValue<'a> {
+    Utf8(&'a str),
+    Ucs2(&'a Ucs2Str),
+}
+
+#[derive(Debug, Clone, Hash)]
+pub struct UnicodeTableEntry<'a> {
+    pub index: u32,
+    pub value: UnicodeTableEntryValue<'a>,
+}
+
+impl<'a> Iterator for UnicodeTableEntries<'a> {
+    type Item = UnicodeTableEntry<'a>;
+    fn next(&mut self) -> Option<Self::Item> {
+        const ERROR_MSG: &str = "PSF unicode table is invalid";
+
+        if self.index == self.raw_bytes.len() {
+            return None;
+        }
+
+        let (entry_index, str_start) = (self.entry_index, self.index);
+        let mut str_end = self.index;
+        match self.version {
+            PsfVersion::Psf1 => {
+                str_end += 2 * self.raw_bytes[self.index..]
+                    .chunks(2)
+                    .position(|ch| matches!(ch, [0xFF | 0xFE, 0xFF]))
+                    .expect(ERROR_MSG);
+                self.index = str_end + 2;
+            }
+            PsfVersion::Psf2 => {
+                str_end += self.raw_bytes[self.index..]
+                    .iter()
+                    .position(|&ch| 0xFD < ch)
+                    .expect(ERROR_MSG);
+                self.index = str_end + 1;
+            }
+        }
+        if self.raw_bytes[str_end] == 0xFF {
+            self.entry_index += 1;
+        }
+        let bytes = &self.raw_bytes[str_start..str_end];
+        // if bytes.is_empty() {
+        //     panic!("{ERROR_MSG}");
+        // }
+        Some(UnicodeTableEntry {
+            index: entry_index,
+            value: match self.version {
+                PsfVersion::Psf1 => {
+                    UnicodeTableEntryValue::Ucs2(Ucs2Str::from_bytes(bytes).expect(ERROR_MSG))
+                }
+                PsfVersion::Psf2 => {
+                    UnicodeTableEntryValue::Utf8(str::from_utf8(bytes).expect(ERROR_MSG))
+                }
+            },
+        })
     }
 }

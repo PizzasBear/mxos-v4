@@ -26,3 +26,4 @@ heapless = "0.8"
 itertools = { version = "0.12", default-features = false, features = [
     "use_alloc",
 ] }
+hashbrown = { version = "0.14", features = ["nightly"] }

@@ -1,6 +1,7 @@
 use core::fmt;
 
 use alloc::collections::{BTreeMap, BTreeSet};
+use bootloader_api::info::MemoryRegion;
 use x86_64::{
     structures::paging::{
         mapper::{MapToError, MapperFlush},
@@ -11,7 +12,10 @@ use x86_64::{
     VirtAddr,
 };
 
-use crate::{malloc::ALLOC, pmm::BuddyAllocator};
+use crate::{
+    malloc::ALLOC,
+    pmm::{self, BuddyAllocator},
+};
 
 const PAGE_SIZE: usize = 4096;
 const HUGE_PAGE_SIZE: usize = 2 << 20;
@@ -120,7 +124,8 @@ pub struct VirtualMemoryManager<'a> {
 impl<'a> fmt::Debug for VirtualMemoryManager<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("VirtualMemoryManager")
-            // .field("frame_allocator", &self.frame_allocator)
+            .field("page_table", &format_args!("OffsetPageTable {{ ... }}"))
+            .field("frame_allocator", &format_args!("BuddyAllocator {{ ... }}"))
             .field("kernel_alloc", &self.kernel_alloc)
             .field("user_alloc", &self.user_alloc)
             .field("kernel_start", &self.kernel_start)
@@ -252,9 +257,10 @@ impl<'a> VirtualMemoryManager<'a> {
 static VMM: spin::Once<spin::Mutex<VirtualMemoryManager<'static>>> = spin::Once::new();
 
 pub fn init(
-    kernel_start: VirtAddr,
     mut page_table: OffsetPageTable<'static>,
-    mut frame_allocator: BuddyAllocator<'static>,
+    kernel_start: VirtAddr,
+    memory_regions: &[MemoryRegion],
+    memory_size: u64,
 ) {
     fn free_page_table(
         alloc: &mut TreeBestFitAlloc,
@@ -304,7 +310,9 @@ pub fn init(
         }
     }
 
-    VMM.call_once(|| {
+    VMM.call_once(move || {
+        let mut frame_allocator = unsafe { pmm::init(&page_table, memory_regions, memory_size) };
+
         let phys_offset = page_table.phys_offset();
 
         const LVL4_ENTRY_ALIGN: usize = PageTableLevel::Four.entry_address_space_alignment() as _;

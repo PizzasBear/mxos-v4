@@ -1,7 +1,8 @@
 #![allow(unused)]
 
-use core::{array, ops, ptr::NonNull};
+use core::{array, mem, ops, ptr::NonNull, slice};
 
+use bootloader_api::info::{MemoryRegion, MemoryRegionKind};
 use x86_64::{
     structures::paging::{
         FrameAllocator, FrameDeallocator, OffsetPageTable, PageSize, PhysFrame, Size2MiB, Size4KiB,
@@ -23,6 +24,62 @@ struct Buddy<'a> {
     // order: u8,
     free_list: Option<NonNull<FreeList>>,
     map: &'a mut Bitmap,
+}
+
+pub unsafe fn init(
+    mapper: &OffsetPageTable,
+    memory_regions: &[MemoryRegion],
+    memory_size: u64,
+) -> BuddyAllocator<'static> {
+    let buddy_map_len = BuddyAllocator::buddy_map_len(memory_size as _);
+
+    let mut start = 0;
+    let mut end = 0;
+
+    let mut phys_alloc = None;
+    let mut buddy_map_start = 0;
+    for r in &*memory_regions {
+        if r.kind != MemoryRegionKind::Usable || r.start < 0x100000 {
+            continue;
+        }
+        if end < r.start {
+            start = r.start + 4095 & !4095;
+        }
+        end = r.end;
+
+        if (mem::size_of::<usize>() * buddy_map_len + 4095) & !4095
+            <= ((end & !4095) - start) as usize
+        {
+            buddy_map_start = start;
+            let buddy_map_ptr = (mapper.phys_offset() + start).as_mut_ptr();
+            phys_alloc = Some(BuddyAllocator::new(memory_size as _, &mapper, unsafe {
+                slice::from_raw_parts_mut(buddy_map_ptr, buddy_map_len)
+            }));
+            break;
+        }
+    }
+    let mut allocator = phys_alloc.unwrap();
+
+    let mut start = 0;
+    let mut end = 0;
+    for r in &*memory_regions {
+        if r.kind != MemoryRegionKind::Usable || r.start < 0x100000 {
+            continue;
+        }
+        if end < r.start {
+            if start == buddy_map_start {
+                start += (mem::size_of::<usize>() * buddy_map_len) as u64 + 4095;
+                start &= !4095;
+            }
+            // blue waffle
+            allocator.free_region(PhysAddr::new(start)..PhysAddr::new(end));
+
+            start = r.start + 4095 & !4095;
+        }
+        end = r.end;
+    }
+
+    allocator
 }
 
 unsafe impl Send for Buddy<'_> {}

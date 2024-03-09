@@ -188,7 +188,10 @@ macro_rules! sprint {
 /// Print to serial port with newline.
 #[macro_export]
 macro_rules! sprintln {
-    ($($arg:tt)*) => {{
+    () => {{
+        $crate::serial::_sprintln(format_args!(""));
+    }};
+    ($($arg:tt)+) => {{
         $crate::serial::_sprintln(format_args!($($arg)*));
     }};
 }

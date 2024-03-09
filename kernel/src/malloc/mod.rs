@@ -4,7 +4,6 @@ use core::{
     cell::UnsafeCell,
     hint::unreachable_unchecked,
     mem::{self, MaybeUninit},
-    num::NonZeroU8,
     ops,
     ptr::{self, NonNull},
     slice,
@@ -155,10 +154,16 @@ impl PageMeta {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum PageKind {
+    Small,
+    Large,
+}
+
 #[derive(Debug)]
 struct SegmentMeta {
     thread_id: u32,
-    class: Option<NonZeroU8>,
+    kind: PageKind,
     used: UnsafeCell<u8>,
 }
 
@@ -199,23 +204,23 @@ impl Segment {
     }
 
     pub fn pages(&self) -> &[MaybeUninit<PageMeta>] {
-        match self.class {
-            None => unsafe {
+        match self.kind {
+            PageKind::Small => unsafe {
                 slice::from_raw_parts(&self.page as *const _, SEGMENT_SIZE / SMALL_PAGE_SIZE - 1)
             },
-            Some(_) => slice::from_ref(&self.page),
+            PageKind::Large => slice::from_ref(&self.page),
         }
     }
 
     pub fn pages_mut(&mut self) -> &mut [MaybeUninit<PageMeta>] {
-        match self.class {
-            None => unsafe {
+        match self.kind {
+            PageKind::Small => unsafe {
                 slice::from_raw_parts_mut(
                     &mut self.page as *mut _,
                     SEGMENT_SIZE / SMALL_PAGE_SIZE - 1,
                 )
             },
-            Some(_) => slice::from_mut(&mut self.page),
+            PageKind::Large => slice::from_mut(&mut self.page),
         }
     }
 }
@@ -366,7 +371,7 @@ impl ThreadOwned<ThreadAllocator> {
                 let segment = unsafe {
                     (segment.as_mut_ptr() as *mut SegmentMeta).write(SegmentMeta {
                         thread_id: self.thread_id,
-                        class: None,
+                        kind: PageKind::Small,
                         used: UnsafeCell::new(1),
                     });
                     segment.assume_init_mut()
@@ -415,7 +420,7 @@ impl ThreadOwned<ThreadAllocator> {
         let segment = unsafe {
             (segment.as_mut_ptr() as *mut SegmentMeta).write(SegmentMeta {
                 thread_id: self.thread_id,
-                class: Some(NonZeroU8::new(large_class as _).unwrap()),
+                kind: PageKind::Large,
                 used: UnsafeCell::new(1),
             });
             segment.assume_init_mut()
@@ -472,9 +477,9 @@ impl ThreadOwned<ThreadAllocator> {
             delayed_free = unsafe { free.as_ref().next };
 
             let seg = unsafe { ThreadOwned::from_ref(&*Segment::from_ptr(free.as_ptr())) };
-            let page_id = match seg.class {
-                None => Segment::block_small_page_id(free.as_ptr() as _),
-                Some(_) => 0,
+            let page_id = match seg.kind {
+                PageKind::Small => Segment::block_small_page_id(free.as_ptr() as _),
+                PageKind::Large => 0,
             };
             let page = unsafe { ThreadOwned::from_ref(seg.pages()[page_id].assume_init_ref()) };
             unsafe { self.local_free(page.class as _, page, free) };
@@ -685,9 +690,9 @@ unsafe impl GlobalAlloc for Allocator {
         let ptr = unsafe { &mut *ptr.cast() };
 
         let seg = unsafe { &*Segment::from_ptr(ptr) };
-        let page_id = match seg.class {
-            None => Segment::block_small_page_id(ptr),
-            Some(_) => 0,
+        let page_id = match seg.kind {
+            PageKind::Small => Segment::block_small_page_id(ptr),
+            PageKind::Large => 0,
         };
         let page = unsafe { seg.pages()[page_id].assume_init_ref() };
 
