@@ -24,6 +24,8 @@ struct Buddy<'a> {
     map: &'a mut Bitmap,
 }
 
+unsafe impl Send for Buddy<'_> {}
+
 impl Buddy<'_> {
     // const fn map_size(memory_size: usize, order: u8) -> usize {
     //     const BITS: usize = usize::BITS as _;
@@ -234,10 +236,10 @@ impl<'a> BuddyAllocator<'a> {
     }
 
     pub fn free(&mut self, order: u8, addr: PhysAddr) {
-        log::info!(
-            "free: order={order} range={:?}",
-            addr..addr + (1u64 << order)
-        );
+        // log::info!(
+        //     "free: order={order} range={:?}",
+        //     addr..addr + (1u64 << order)
+        // );
 
         assert!(addr.is_aligned(1u64 << order));
 
