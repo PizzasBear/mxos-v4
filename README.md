@@ -8,4 +8,5 @@ My fourth attempt at a small kernel written in rust.
 - Mimalloc inspired global allocator
 - Basic BTree based virtual memory manager
 - QEMU UART 16550 serial logging
-- PSF font rendering (in progress)
+- PSF font parsing
+- Working text-mode console

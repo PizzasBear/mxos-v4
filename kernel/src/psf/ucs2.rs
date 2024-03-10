@@ -89,7 +89,7 @@ impl<'a> TryFrom<&'a mut [u8]> for &'a mut Ucs2Str {
         Ucs2Str::from_bytes_mut(bytes).ok_or(())
     }
 }
-impl<'a> From<&Ucs2Str> for String {
+impl From<&Ucs2Str> for String {
     fn from(s: &Ucs2Str) -> Self {
         s.chars().collect()
     }

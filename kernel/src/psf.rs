@@ -272,9 +272,16 @@ impl<'a> PsfFile<'a> {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
 pub struct Glyph<'a> {
     pub bytes: &'a [u8],
-    pub width: u32,
+    width: u32,
+}
+
+impl Glyph<'_> {
+    pub fn width(&self) -> u32 {
+        self.width
+    }
 }
 
 #[derive(Debug, Clone)]

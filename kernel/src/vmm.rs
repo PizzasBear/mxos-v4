@@ -80,7 +80,7 @@ impl TreeBestFitAlloc {
 
     fn free(&mut self, mut addr: usize, mut size: usize) {
         // log::info!("We shall free: addr={addr:?} size={size}");
-        addr = addr & !(PAGE_SIZE - 1);
+        addr &= !(PAGE_SIZE - 1);
         size = size + PAGE_SIZE - 1 & !(PAGE_SIZE - 1);
 
         // log::info!("JOE SHAV 1");
@@ -90,7 +90,7 @@ impl TreeBestFitAlloc {
                 self.addr_size_tree.remove(&prev_addr);
                 self.size_addr_tree
                     .remove(&SizeAddr::new(prev_size, prev_addr));
-                size = prev_size.max((addr - prev_addr) as usize + size);
+                size = prev_size.max((addr - prev_addr) + size);
                 addr = prev_addr;
             }
         }
@@ -373,7 +373,7 @@ pub fn init(
         let mut vmm = VirtualMemoryManager::new(kernel_start, page_table, frame_allocator);
 
         for (i, entry) in vmm.page_table.level_4_table().iter().enumerate() {
-            let alloc = match i < pml4_kernel_start as usize {
+            let alloc = match i < pml4_kernel_start {
                 true => &mut vmm.user_alloc,
                 false => {
                     // log::info!("Let's go kernel");
