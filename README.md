@@ -9,4 +9,4 @@ My fourth attempt at a small kernel written in rust.
 - Basic BTree based virtual memory manager
 - QEMU UART 16550 serial logging
 - PSF font parsing
-- Working text-mode console
+- Working console graphics on framebuffer
