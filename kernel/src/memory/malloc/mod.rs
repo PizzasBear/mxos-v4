@@ -12,7 +12,7 @@ use core::{
 
 use x86_64::VirtAddr;
 
-use crate::vmm::VirtualMemoryManager;
+use super::vmm::VirtualMemoryManager;
 
 macro_rules! cfor {
     ($ident:ident in range($end:expr) $block:block) => {

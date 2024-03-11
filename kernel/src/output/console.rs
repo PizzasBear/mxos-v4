@@ -8,9 +8,10 @@ use crate::psf::{self, PsfFile};
 pub static CONSOLE: spin::Mutex<Option<ConsoleGraphics>> = spin::Mutex::new(None);
 
 pub fn init(font: &'static PsfFile, framebuffer: &'static mut FrameBuffer) {
-    (CONSOLE.lock())
-        .insert(ConsoleGraphics::new(font, framebuffer))
-        .clear();
+    log::info!("Initializing console");
+    let mut console = ConsoleGraphics::new(font, framebuffer);
+    console.clear();
+    (CONSOLE.lock()).replace(console);
 }
 
 pub fn deinit() -> Option<&'static mut FrameBuffer> {
@@ -105,24 +106,25 @@ impl<'a> ConsoleGraphics<'a> {
             return status;
         }
 
-        let Some(&glyph_id) = self.table.get(&ch).or_else(|| {
-            status = false;
-            self.table.get(&'\u{FFFD}')
-        }) else {
-            return false;
-        };
-        let glyph = self.font.get_glyph(glyph_id).unwrap();
+        let glyph_id = self.table.get(&ch);
+        status &= glyph_id.is_some();
+        if let Some(&glyph_id) = glyph_id
+            .or_else(|| self.table.get(&'\u{FFFD}'))
+            .or_else(|| self.table.get(&'?'))
+        {
+            let glyph = self.font.get_glyph(glyph_id).unwrap();
 
-        let info = self.framebuffer.info();
-        let buf = self.framebuffer.buffer_mut();
+            let info = self.framebuffer.info();
+            let buf = self.framebuffer.buffer_mut();
 
-        for (y, row) in (self.cursor.y..).zip(glyph.rows()) {
-            for (x, pixel) in (self.cursor.x..).zip(row) {
-                let idx = info.bytes_per_pixel * (info.stride * y + x);
-                let pixel_buf = &mut buf[idx..idx + info.bytes_per_pixel];
-                match pixel {
-                    true => pixel_buf.fill(255),
-                    false => pixel_buf.fill(0),
+            for (y, row) in (self.cursor.y..).zip(glyph.rows()) {
+                for (x, pixel) in (self.cursor.x..).zip(row) {
+                    let idx = info.bytes_per_pixel * (info.stride * y + x);
+                    let pixel_buf = &mut buf[idx..idx + info.bytes_per_pixel];
+                    match pixel {
+                        true => pixel_buf.fill(255),
+                        false => pixel_buf.fill(0),
+                    }
                 }
             }
         }
@@ -135,7 +137,8 @@ impl<'a> ConsoleGraphics<'a> {
 
 impl fmt::Write for ConsoleGraphics<'_> {
     fn write_char(&mut self, ch: char) -> fmt::Result {
-        self.putchar(ch).then_some(()).ok_or(fmt::Error)
+        self.putchar(ch);
+        Ok(())
     }
     fn write_str(&mut self, s: &str) -> fmt::Result {
         for ch in s.chars() {
@@ -148,28 +151,20 @@ impl fmt::Write for ConsoleGraphics<'_> {
 #[derive(Debug)]
 pub enum Error {
     Uninitialized,
-    FormatError,
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Uninitialized => write!(f, "Console is uninitialized"),
-            Self::FormatError => write!(f, "Formatting error"),
         }
-    }
-}
-
-impl From<fmt::Error> for Error {
-    fn from(_: fmt::Error) -> Self {
-        Self::FormatError
     }
 }
 
 /// Prints to the serial port. Don't use directly, use `sprint!()` instead.
 #[doc(hidden)]
 pub fn _cprint(args: core::fmt::Arguments) -> Result<(), Error> {
-    fmt::write(CONSOLE.lock().as_mut().ok_or(Error::Uninitialized)?, args)?;
+    fmt::write(CONSOLE.lock().as_mut().ok_or(Error::Uninitialized)?, args).unwrap();
     Ok(())
 }
 /// Prints to the serial port. Don't use directly, use `sprintln!()` instead.
@@ -177,7 +172,7 @@ pub fn _cprint(args: core::fmt::Arguments) -> Result<(), Error> {
 pub fn _cprintln(args: core::fmt::Arguments) -> Result<(), Error> {
     let mut binding = CONSOLE.lock();
     let console = binding.as_mut().ok_or(Error::Uninitialized)?;
-    fmt::write(console, args)?;
+    fmt::write(console, args).unwrap();
     console.putchar('\n');
     Ok(())
 }
@@ -194,9 +189,9 @@ macro_rules! cprint {
 #[macro_export]
 macro_rules! cprintln {
     () => {{
-        $crate::console::_cprintln(format_args!("")).expect("Printing to console failed");
+        $crate::output::console::_cprintln(format_args!("")).expect("Printing to console failed");
     }};
     ($($arg:tt)+) => {{
-        $crate::console::_cprintln(format_args!($($arg)*)).expect("Printing to console failed");
+        $crate::output::console::_cprintln(format_args!($($arg)*)).expect("Printing to console failed");
     }};
 }

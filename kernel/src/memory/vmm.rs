@@ -12,7 +12,7 @@ use x86_64::{
     VirtAddr,
 };
 
-use crate::{
+use super::{
     malloc::ALLOC,
     pmm::{self, BuddyAllocator},
 };
