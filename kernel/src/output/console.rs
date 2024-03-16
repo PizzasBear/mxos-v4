@@ -2,19 +2,21 @@ use core::fmt;
 
 use bootloader_api::info::FrameBuffer;
 use hashbrown::HashMap;
+use x86_64::instructions::interrupts::without_interrupts;
 
 use crate::psf::{self, PsfFile};
 
 pub static CONSOLE: spin::Mutex<Option<ConsoleGraphics>> = spin::Mutex::new(None);
 
-pub fn init(font: &'static PsfFile, framebuffer: &'static mut FrameBuffer) {
+pub fn init(font: &'static PsfFile, framebuffer: FrameBuffer) {
     log::info!("Initializing console");
     let mut console = ConsoleGraphics::new(font, framebuffer);
     console.clear();
     (CONSOLE.lock()).replace(console);
+    log::info!("Console initialized");
 }
 
-pub fn deinit() -> Option<&'static mut FrameBuffer> {
+pub fn deinit() -> Option<FrameBuffer> {
     Some((CONSOLE.lock()).take()?.framebuffer)
 }
 
@@ -32,13 +34,13 @@ impl Point {
 
 pub struct ConsoleGraphics<'a> {
     font: &'a PsfFile<'a>,
-    framebuffer: &'a mut FrameBuffer,
+    framebuffer: FrameBuffer,
     table: HashMap<char, u32>,
     cursor: Point,
 }
 
 impl<'a> ConsoleGraphics<'a> {
-    fn new(font: &'a PsfFile<'a>, framebuffer: &'a mut FrameBuffer) -> Self {
+    fn new(font: &'a PsfFile<'a>, framebuffer: FrameBuffer) -> Self {
         let mut table = HashMap::new();
         for entry in font.unicode_table_entries() {
             match entry.value {
@@ -104,6 +106,9 @@ impl<'a> ConsoleGraphics<'a> {
             self.cursor.x = 0;
             self.move_down();
             return status;
+        } else if ch == '\t' {
+            self.move_right(4);
+            return status;
         }
 
         let glyph_id = self.table.get(&ch);
@@ -164,17 +169,21 @@ impl fmt::Display for Error {
 /// Prints to the serial port. Don't use directly, use `sprint!()` instead.
 #[doc(hidden)]
 pub fn _cprint(args: core::fmt::Arguments) -> Result<(), Error> {
-    fmt::write(CONSOLE.lock().as_mut().ok_or(Error::Uninitialized)?, args).unwrap();
-    Ok(())
+    without_interrupts(|| {
+        fmt::write(CONSOLE.lock().as_mut().ok_or(Error::Uninitialized)?, args).unwrap();
+        Ok(())
+    })
 }
 /// Prints to the serial port. Don't use directly, use `sprintln!()` instead.
 #[doc(hidden)]
 pub fn _cprintln(args: core::fmt::Arguments) -> Result<(), Error> {
-    let mut binding = CONSOLE.lock();
-    let console = binding.as_mut().ok_or(Error::Uninitialized)?;
-    fmt::write(console, args).unwrap();
-    console.putchar('\n');
-    Ok(())
+    without_interrupts(|| {
+        let mut binding = CONSOLE.lock();
+        let console = binding.as_mut().ok_or(Error::Uninitialized)?;
+        fmt::write(console, args).unwrap();
+        console.putchar('\n');
+        Ok(())
+    })
 }
 
 /// Print to console.

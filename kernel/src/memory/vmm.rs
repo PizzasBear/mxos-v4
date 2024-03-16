@@ -9,7 +9,7 @@ use x86_64::{
         FrameAllocator, Mapper, OffsetPageTable, Page, PageSize, PageTable, PageTableFlags,
         PhysFrame, Size2MiB, Size4KiB,
     },
-    VirtAddr,
+    PhysAddr, VirtAddr,
 };
 
 use super::{
@@ -17,8 +17,8 @@ use super::{
     pmm::{self, BuddyAllocator},
 };
 
-const PAGE_SIZE: usize = 4096;
-const HUGE_PAGE_SIZE: usize = 2 << 20;
+const PAGE_SIZE: usize = Size4KiB::SIZE as _;
+const HUGE_PAGE_SIZE: usize = Size2MiB::SIZE as _;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct SizeAddr {
@@ -148,7 +148,7 @@ impl<'a> VirtualMemoryManager<'a> {
         }
     }
 
-    unsafe fn map<S: PageSize + fmt::Debug>(
+    unsafe fn page_map<S: PageSize + fmt::Debug>(
         &mut self,
         addr: VirtAddr,
         frame: PhysFrame<S>,
@@ -167,11 +167,57 @@ impl<'a> VirtualMemoryManager<'a> {
         }
     }
 
+    /// Make sure that `phys_addr` is not mapped to any virtual address.
+    pub unsafe fn map(
+        &mut self,
+        kernel: bool,
+        mut size: usize,
+        align_order: u8,
+        mut phys_addr: PhysAddr,
+    ) -> Option<VirtAddr> {
+        let addr_offset = phys_addr.as_u64() as usize & (PAGE_SIZE - 1);
+        phys_addr -= addr_offset as u64;
+        size += addr_offset;
+
+        let SizeAddr { mut size, addr } = match kernel {
+            true => self.kernel_alloc.alloc(size, align_order)?,
+            false => self.user_alloc.alloc(size, align_order)?,
+        };
+        let mut addr = VirtAddr::new(addr as _);
+        let return_addr = addr + addr_offset as u64;
+
+        let mut page_flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+        page_flags.set(PageTableFlags::USER_ACCESSIBLE, !kernel);
+        while 0 < size && !addr.is_aligned(HUGE_PAGE_SIZE as u64) {
+            let frame = unsafe { PhysFrame::<Size4KiB>::from_start_address_unchecked(phys_addr) };
+            unsafe { self.page_map(addr, frame, page_flags).unwrap().flush() };
+            phys_addr += PAGE_SIZE as u64;
+            addr += PAGE_SIZE as u64;
+            size -= PAGE_SIZE;
+        }
+        while HUGE_PAGE_SIZE <= size {
+            let frame = unsafe { PhysFrame::<Size2MiB>::from_start_address_unchecked(phys_addr) };
+            unsafe { self.page_map(addr, frame, page_flags).unwrap().flush() };
+            phys_addr += HUGE_PAGE_SIZE as u64;
+            addr += HUGE_PAGE_SIZE as u64;
+            size -= HUGE_PAGE_SIZE;
+        }
+        while 0 < size {
+            let frame = unsafe { PhysFrame::<Size4KiB>::from_start_address_unchecked(phys_addr) };
+            unsafe { self.page_map(addr, frame, page_flags).unwrap().flush() };
+            phys_addr += PAGE_SIZE as u64;
+            addr += PAGE_SIZE as u64;
+            size -= PAGE_SIZE;
+        }
+
+        Some(return_addr)
+    }
+
     pub fn alloc(&mut self, kernel: bool, size: usize, align_order: u8) -> Option<VirtAddr> {
         let SizeAddr { addr, mut size } = match kernel {
-            true => self.kernel_alloc.alloc(size, align_order),
-            false => self.user_alloc.alloc(size, align_order),
-        }?;
+            true => self.kernel_alloc.alloc(size, align_order)?,
+            false => self.user_alloc.alloc(size, align_order)?,
+        };
         let return_addr = VirtAddr::new(addr as _);
         let mut addr = return_addr;
         log::info!(
@@ -183,19 +229,19 @@ impl<'a> VirtualMemoryManager<'a> {
         page_flags.set(PageTableFlags::USER_ACCESSIBLE, !kernel);
         while 0 < size && !addr.is_aligned(HUGE_PAGE_SIZE as u64) {
             let frame: PhysFrame<Size4KiB> = self.frame_allocator.allocate_frame()?;
-            unsafe { self.map(addr, frame, page_flags).unwrap().flush() };
+            unsafe { self.page_map(addr, frame, page_flags).unwrap().flush() };
             addr += PAGE_SIZE as u64;
             size -= PAGE_SIZE;
         }
         while HUGE_PAGE_SIZE <= size {
             let frame: PhysFrame<Size2MiB> = self.frame_allocator.allocate_frame()?;
-            unsafe { self.map(addr, frame, page_flags).unwrap().flush() };
+            unsafe { self.page_map(addr, frame, page_flags).unwrap().flush() };
             addr += HUGE_PAGE_SIZE as u64;
             size -= HUGE_PAGE_SIZE;
         }
         while 0 < size {
             let frame: PhysFrame<Size4KiB> = self.frame_allocator.allocate_frame()?;
-            unsafe { self.map(addr, frame, page_flags).unwrap().flush() };
+            unsafe { self.page_map(addr, frame, page_flags).unwrap().flush() };
             addr += PAGE_SIZE as u64;
             size -= PAGE_SIZE;
         }
@@ -208,14 +254,16 @@ impl<'a> VirtualMemoryManager<'a> {
         Some(return_addr)
     }
 
-    pub fn free(&mut self, mut addr: VirtAddr, mut size: usize) {
+    pub unsafe fn free(&mut self, mut addr: VirtAddr, mut size: usize) {
         let kernel = self.kernel_start <= addr;
 
         if !kernel && self.kernel_start < addr + size as u64 {
-            self.free(
-                self.kernel_start,
-                (addr + size as u64 - self.kernel_start) as _,
-            );
+            unsafe {
+                self.free(
+                    self.kernel_start,
+                    (addr + size as u64 - self.kernel_start) as _,
+                );
+            }
             size = (self.kernel_start - addr) as _;
         }
 
@@ -254,7 +302,7 @@ impl<'a> VirtualMemoryManager<'a> {
     }
 }
 
-static VMM: spin::Once<spin::Mutex<VirtualMemoryManager<'static>>> = spin::Once::new();
+pub static VMM: spin::Once<spin::Mutex<VirtualMemoryManager<'static>>> = spin::Once::new();
 
 pub fn init(
     mut page_table: OffsetPageTable<'static>,

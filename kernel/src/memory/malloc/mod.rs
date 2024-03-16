@@ -461,17 +461,16 @@ impl ThreadOwned<ThreadAllocator> {
         *local_free = free.as_ptr();
     }
 
-    pub unsafe fn alloc(&self, free_segments: &FreeSegments, class: usize) -> *mut u8 {
-        if let Some(page) = unsafe { *self.pages[class].get() } {
-            let page = unsafe { page.as_ref() };
-            let page_free = unsafe { &mut *page.free.get() };
-            if let Some(free) = unsafe { page_free.as_mut() } {
-                unsafe { *page.used.get() += 1 };
-                *page_free = free.next;
-                return free as *mut _ as _;
-            }
-        }
+    pub unsafe fn fast_alloc(&self, class: usize) -> Option<NonNull<u8>> {
+        let page = unsafe { (*self.pages[class].get())?.as_ref() };
+        let page_free = unsafe { &mut *page.free.get() };
+        let free = unsafe { page_free.as_mut()? };
+        unsafe { *page.used.get() += 1 };
+        *page_free = free.next;
+        Some(NonNull::from(free).cast())
+    }
 
+    pub unsafe fn alloc(&self, free_segments: &FreeSegments, class: usize) -> *mut u8 {
         let mut delayed_free = self.delayed_free.swap(ptr::null_mut(), SeqCst);
         while let Some(free) = NonNull::new(delayed_free) {
             delayed_free = unsafe { free.as_ref().next };
@@ -614,7 +613,14 @@ unsafe impl GlobalAlloc for Allocator {
                 .map_or(ptr::null_mut(), |addr| addr.as_mut_ptr());
         }
 
-        log::info!("ALLOC: layout={layout:?} size=0x{size:x}");
+        // Get this thread's id
+        let thread_id = 0;
+        let thread_alloc = unsafe { ThreadOwned::from_ref(&self.thread_allocs[thread_id]) };
+        let class = size_class(size);
+
+        if let Some(ptr) = unsafe { thread_alloc.fast_alloc(class) } {
+            return ptr.as_ptr();
+        }
 
         'alloc_segments: {
             if 3 < self.free_segments.len() {
@@ -629,28 +635,11 @@ unsafe impl GlobalAlloc for Allocator {
                 );
                 break 'alloc_segments;
             };
-            loop {
-                log::info!(
-                    "ALLOC_SEGMENTS: Let's alloc one \
-                     layout={layout:?} free_segments_len={} vmm={vmm:#?}",
-                    self.free_segments.len(),
-                );
-                let list: *mut Segment = vmm
-                    .alloc(true, SEGMENT_SIZE, SEGMENT_SIZE.trailing_zeros() as _)
-                    .unwrap()
-                    .as_mut_ptr();
-                log::info!(
-                    "ALLOC_SEGMENTS: We did an alloc \
-                     layout={layout:?} free_segments_len={}",
-                    self.free_segments.len(),
-                );
-
+            while let Some(list) = vmm
+                .alloc(true, SEGMENT_SIZE, SEGMENT_SIZE.trailing_zeros() as _)
+                .map(|addr| addr.as_mut_ptr::<Segment>())
+            {
                 unsafe { self.free_segments.push(list) };
-                log::info!(
-                    "ALLOC_SEGMENTS: We pushed an alloc \
-                     layout={layout:?} free_segments_len={}",
-                    self.free_segments.len(),
-                );
 
                 if 3 < self.free_segments.len() {
                     break;
@@ -658,12 +647,7 @@ unsafe impl GlobalAlloc for Allocator {
             }
         }
 
-        // Get this thread's id
-        let thread_id = 0;
-        let result = unsafe {
-            ThreadOwned::from_ref(&self.thread_allocs[thread_id])
-                .alloc(&self.free_segments, size_class(size))
-        };
+        let result = unsafe { thread_alloc.alloc(&self.free_segments, class) };
 
         if result.is_null() {
             log::info!("ALLOC: result is null");
@@ -674,14 +658,14 @@ unsafe impl GlobalAlloc for Allocator {
         result
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        log::info!("DEALLOC: ptr={ptr:p} layout={layout:?}");
+        // log::info!("DEALLOC: ptr={ptr:p} layout={layout:?}");
         let size = layout.align_to(8).unwrap().pad_to_align().size();
         if *LARGE_SIZE_CLASSES.last().unwrap() < size {
             let Some(mut vmm) = self.vmm.get().and_then(|vmm| vmm.try_lock()) else {
                 log::info!("DEALLOC_HUGE: Failed to acquire vmm lock");
                 return;
             };
-            return vmm.free(VirtAddr::from_ptr(ptr), layout.size());
+            return unsafe { vmm.free(VirtAddr::from_ptr(ptr), layout.size()) };
         }
 
         // Get this thread's id

@@ -1,6 +1,6 @@
 #![allow(unused)]
 
-use core::{array, mem, ops, ptr::NonNull, slice};
+use core::{array, iter, mem, ops, ptr::NonNull, slice};
 
 use bootloader_api::info::{MemoryRegion, MemoryRegionKind};
 use x86_64::{
@@ -62,7 +62,7 @@ pub unsafe fn init(
 
     let mut start = 0;
     let mut end = 0;
-    for r in &*memory_regions {
+    for r in memory_regions.iter() {
         if r.kind != MemoryRegionKind::Usable || r.start < 0x100000 {
             continue;
         }
@@ -78,6 +78,12 @@ pub unsafe fn init(
         }
         end = r.end;
     }
+
+    if start == buddy_map_start {
+        start += (mem::size_of::<usize>() * buddy_map_len) as u64 + 4095;
+        start &= !4095;
+    }
+    allocator.free_region(PhysAddr::new(start)..PhysAddr::new(end));
 
     allocator
 }

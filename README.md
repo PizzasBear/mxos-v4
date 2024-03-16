@@ -10,3 +10,4 @@ My fourth attempt at a small kernel written in rust.
 - QEMU UART 16550 serial logging
 - PSF font parsing
 - Working console graphics on framebuffer
+- Experimental local xAPIC & x2APIC support (indev)

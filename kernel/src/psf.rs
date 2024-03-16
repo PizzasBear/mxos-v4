@@ -372,11 +372,8 @@ impl<'a> DoubleEndedIterator for GlyphRowIter<'a> {
 impl<'a> Glyph<'a> {
     pub fn rows(
         &self,
-    ) -> impl 'a
-           + Iterator<Item = GlyphRowIter<'a>>
-           + DoubleEndedIterator
-           + FusedIterator
-           + ExactSizeIterator {
+    ) -> impl 'a + DoubleEndedIterator<Item = GlyphRowIter<'a>> + FusedIterator + ExactSizeIterator
+    {
         let indices = ((self.width + 7) % 8 << 4) as _;
         self.bytes
             .chunks((self.width + 7 >> 3) as _)

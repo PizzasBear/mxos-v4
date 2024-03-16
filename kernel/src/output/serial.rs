@@ -4,6 +4,7 @@ use core::fmt;
 
 use spin::{Lazy, Mutex};
 use uart_16550::SerialPort;
+use x86_64::instructions::interrupts::without_interrupts;
 
 /// The serial port.
 pub static SERIAL1: Lazy<Mutex<SerialPort>> = Lazy::new(|| {
@@ -15,15 +16,19 @@ pub static SERIAL1: Lazy<Mutex<SerialPort>> = Lazy::new(|| {
 /// Prints to the serial port. Don't use directly, use `sprint!()` instead.
 #[doc(hidden)]
 pub fn _sprint(args: core::fmt::Arguments) {
-    // SERIAL1.lock().write_fmt(args).expect("Printing to serial failed");
-    fmt::write(&mut *SERIAL1.lock(), args).expect("Printing to serial failed");
+    without_interrupts(|| {
+        // SERIAL1.lock().write_fmt(args).expect("Printing to serial failed");
+        fmt::write(&mut *SERIAL1.lock(), args).expect("Printing to serial failed");
+    })
 }
 /// Prints to the serial port. Don't use directly, use `sprintln!()` instead.
 #[doc(hidden)]
 pub fn _sprintln(args: core::fmt::Arguments) {
-    let serial1 = &mut *SERIAL1.lock();
-    fmt::write(serial1, args).expect("Printing to serial failed");
-    serial1.send(b'\n');
+    without_interrupts(|| {
+        let serial1 = &mut *SERIAL1.lock();
+        fmt::write(serial1, args).expect("Printing to serial failed");
+        serial1.send(b'\n');
+    })
 }
 
 /// Print to serial port.

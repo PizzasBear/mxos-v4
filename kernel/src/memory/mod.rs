@@ -1,9 +1,11 @@
-use bootloader_api::info::{BootInfo, MemoryRegionKind};
-use x86_64::{registers::control::Cr3, structures::paging::OffsetPageTable, VirtAddr};
-
 pub mod malloc;
 pub mod pmm;
 pub mod vmm;
+
+pub use vmm::VMM;
+
+use bootloader_api::info::{BootInfo, MemoryRegionKind};
+use x86_64::{registers::control::Cr3, structures::paging::OffsetPageTable, VirtAddr};
 
 unsafe fn offset_page_table(physical_memory_offset: VirtAddr) -> OffsetPageTable<'static> {
     let (lvl4_table, _) = Cr3::read();

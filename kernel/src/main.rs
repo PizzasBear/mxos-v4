@@ -1,10 +1,13 @@
 #![no_std] // don't link the Rust standard library
 #![no_main] // disable all Rust-level entry points
+#![feature(abi_x86_interrupt)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
 extern crate alloc;
 
 pub mod bitmap;
+pub mod gdt;
+pub mod interrupts;
 pub mod memory;
 pub mod output;
 pub mod psf;
@@ -30,15 +33,29 @@ static PSF_FONT: spin::Lazy<PsfFile<'static>> =
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     output::init_logger();
 
-    log::info!("boot_info={boot_info:#?}");
+    gdt::init();
+    interrupts::init_idt();
 
     memory::init(boot_info);
 
-    let framebuffer = boot_info.framebuffer.as_mut().unwrap();
+    if let Some(framebuffer) = boot_info.framebuffer.take() {
+        output::console::init(&PSF_FONT, framebuffer);
+    }
+    log::info!("BOOT_INFO: {boot_info:#?}");
 
-    output::console::init(&*PSF_FONT, framebuffer);
+    // log::info!(
+    //     "MEMORY_REGIONS: [{}\n]",
+    //     boot_info.memory_regions.iter().format_with(",", |r, f| {
+    //         f(&format_args!(
+    //             "\n\tMemoryRegion {{ range: 0x{:X}..0x{:X}, kind: {:?} }}",
+    //             r.start, r.end, r.kind
+    //         ))
+    //     })
+    // );
 
-    log::info!("Halting");
+    x86_64::instructions::interrupts::int3(); // test interrupts
+
+    unsafe { interrupts::init_apic() };
 
     loop {
         x86_64::instructions::hlt();
@@ -51,12 +68,11 @@ fn panic_handler(info: &core::panic::PanicInfo) -> ! {
     const _: &dyn core::any::Any = &panic_handler;
 
     unsafe {
-        output::LOGGER.force_unlock();
+        output::force_unlock();
     }
-    output::console::CONSOLE.lock().take();
 
-    sprintln!();
-    sprintln!("{info}");
+    println!();
+    println!("{info}");
 
     loop {
         x86_64::instructions::interrupts::disable();
