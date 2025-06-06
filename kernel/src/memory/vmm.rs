@@ -3,13 +3,13 @@ use core::fmt;
 use alloc::collections::{BTreeMap, BTreeSet};
 use bootloader_api::info::MemoryRegion;
 use x86_64::{
+    PhysAddr, VirtAddr,
     structures::paging::{
-        mapper::{MapToError, MapperFlush},
-        page_table::PageTableLevel,
         FrameAllocator, Mapper, OffsetPageTable, Page, PageSize, PageTable, PageTableFlags,
         PhysFrame, Size2MiB, Size4KiB,
+        mapper::{MapToError, MapperFlush},
+        page_table::PageTableLevel,
     },
-    PhysAddr, VirtAddr,
 };
 
 use super::{

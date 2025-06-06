@@ -31,7 +31,10 @@ impl fmt::Display for Error {
             Self::InvalidMagic => write!(f, "Invalid magic bytes"),
             Self::UnknownPsf2Version(ver) => write!(f, "Unsupported version PSF2.{ver}"),
             Self::InvalidGlyphSize => {
-                write!(f, "The provided PSF2 glyph size doesn't equal the calculated size (`height * ((width + 7) / 8)`)")
+                write!(
+                    f,
+                    "The provided PSF2 glyph size doesn't equal the calculated size (`height * ((width + 7) / 8)`)"
+                )
             }
             // Self::UnicodeTooLong => {
             //     write!(

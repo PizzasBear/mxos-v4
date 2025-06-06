@@ -1,10 +1,10 @@
 pub mod apic;
 
 use x86_64::{
+    PhysAddr,
     instructions::port::Port,
     registers::model_specific::Msr,
     structures::idt::{InterruptDescriptorTable, InterruptStackFrame},
-    PhysAddr,
 };
 
 use apic::ApicRegs;

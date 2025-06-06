@@ -5,7 +5,7 @@ pub mod vmm;
 pub use vmm::VMM;
 
 use bootloader_api::info::{BootInfo, MemoryRegionKind};
-use x86_64::{registers::control::Cr3, structures::paging::OffsetPageTable, VirtAddr};
+use x86_64::{VirtAddr, registers::control::Cr3, structures::paging::OffsetPageTable};
 
 unsafe fn offset_page_table(physical_memory_offset: VirtAddr) -> OffsetPageTable<'static> {
     let (lvl4_table, _) = Cr3::read();

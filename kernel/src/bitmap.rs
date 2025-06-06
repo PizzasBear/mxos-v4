@@ -52,7 +52,7 @@ impl<T: ?Sized + AsRef<[usize]>> Bitmap<T> {
         let (i, bits) = (self.0.as_ref().iter())
             .enumerate()
             .skip(start / usize::BITS as usize)
-            .find(|(_, &b)| b != 0)?;
+            .find(|&(_, &b)| b != 0)?;
         Some(Self::merge_bit(i, bits.trailing_zeros()))
     }
 
@@ -60,7 +60,7 @@ impl<T: ?Sized + AsRef<[usize]>> Bitmap<T> {
         let (i, bits) = (self.0.as_ref().iter())
             .enumerate()
             .skip(start / usize::BITS as usize)
-            .find(|(_, &b)| b != !0)?;
+            .find(|&(_, &b)| b != !0)?;
         Some(Self::merge_bit(i, bits.trailing_ones()))
     }
 

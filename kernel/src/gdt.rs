@@ -1,11 +1,9 @@
-use core::ptr;
-
 use x86_64::{
+    VirtAddr,
     structures::{
         gdt::{self, GlobalDescriptorTable},
         tss::TaskStateSegment,
     },
-    VirtAddr,
 };
 
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
@@ -15,7 +13,7 @@ static TSS: spin::Lazy<TaskStateSegment> = spin::Lazy::new(|| {
     tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = {
         const STACK_SIZE: usize = 20 << 10;
         static mut STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
-        let stack_start = VirtAddr::from_ptr(unsafe { ptr::addr_of!(STACK) });
+        let stack_start = VirtAddr::from_ptr(&raw mut STACK);
         let stack_end = stack_start + STACK_SIZE as u64;
         stack_end
     };
@@ -44,7 +42,7 @@ static GDT: spin::Lazy<Gdt> = spin::Lazy::new(|| {
 
 pub fn init() {
     use x86_64::{
-        instructions::segmentation::{Segment, CS, DS, SS},
+        instructions::segmentation::{CS, DS, SS, Segment},
         instructions::tables::load_tss,
     };
     GDT.gdt.load();

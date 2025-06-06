@@ -12,7 +12,7 @@ pub mod memory;
 pub mod output;
 pub mod psf;
 
-use bootloader_api::{entry_point, BootInfo, BootloaderConfig};
+use bootloader_api::{BootInfo, BootloaderConfig, entry_point};
 
 use psf::PsfFile;
 

@@ -4,10 +4,10 @@ use core::{array, iter, mem, ops, ptr::NonNull, slice};
 
 use bootloader_api::info::{MemoryRegion, MemoryRegionKind};
 use x86_64::{
+    PhysAddr, VirtAddr,
     structures::paging::{
         FrameAllocator, FrameDeallocator, OffsetPageTable, PageSize, PhysFrame, Size2MiB, Size4KiB,
     },
-    PhysAddr, VirtAddr,
 };
 
 use crate::bitmap::Bitmap;
