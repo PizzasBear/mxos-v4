@@ -31,7 +31,11 @@ fn main() -> Result<()> {
 
     let mut cmd = std::process::Command::new("qemu-system-x86_64");
     cmd.args(["-enable-kvm", "-s", "-m", "8G"]);
-    cmd.args(["-serial", &format!("file:{}", log_file.display())]);
+    cmd.args([
+        "-chardev",
+        &format!("stdio,id=char0,logfile={}", log_file.display()),
+    ]);
+    cmd.args(["-serial", "chardev:char0"]);
 
     if uefi {
         cmd.args([

@@ -151,7 +151,7 @@ impl LocalVectorTable {
         }
     }
     /// Available on: LINT0, LINT1.
-    pub fn set_trigger_mode(&mut self, mode: bool) {
+    pub fn set_trigger_mode(&mut self, mode: TriggerMode) {
         self.0 &= !(1 << 15);
         self.0 |= (mode as u32) << 15;
     }

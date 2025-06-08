@@ -301,6 +301,7 @@ impl ApicRegs {
         } else {
             without_interrupts(|| {
                 let addr = self.base_addr;
+                // Order matters! The act of writing to the low doubleword of the ICR causes the IPI to be sent.
                 unsafe { addr.byte_add(0x310).write_volatile((value.0 >> 32) as _) };
                 unsafe { addr.byte_add(0x300).write_volatile(value.0 as _) };
             })
@@ -345,7 +346,7 @@ impl ApicRegs {
         /// Current Count register (for Timer)
         read_current_count: Read<u32, 0x839, 0x390>,
         /// Divide Configuration Register (DCR; for Timer).
-        read_dcr: Read<DivideConfigurationRegister, 0x83E, 0x3E0>,
+        read_timer_div: Read<DivideConfigurationRegister, 0x83E, 0x3E0>,
         /// Divide Configuration Register (DCR; for Timer)
         write_timer_div: Write<DivideConfigurationRegister, 0x83E, 0x3E0>,
     }

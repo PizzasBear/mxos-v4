@@ -1,13 +1,15 @@
 use core::fmt;
 
 use alloc::collections::{BTreeMap, BTreeSet};
+use core::ptr::NonNull;
+
 use bootloader_api::info::MemoryRegion;
 use x86_64::{
     PhysAddr, VirtAddr,
     structures::paging::{
-        FrameAllocator, Mapper, OffsetPageTable, Page, PageSize, PageTable, PageTableFlags,
-        PhysFrame, Size2MiB, Size4KiB,
-        mapper::{MapToError, MapperFlush},
+        FrameAllocator, FrameDeallocator, Mapper, OffsetPageTable, Page, PageSize, PageTable,
+        PageTableFlags, PhysFrame, Size2MiB, Size4KiB,
+        mapper::{CleanUp, MapToError, MapperFlush},
         page_table::PageTableLevel,
     },
 };
@@ -257,6 +259,8 @@ impl<'a> VirtualMemoryManager<'a> {
     pub unsafe fn free(&mut self, mut addr: VirtAddr, mut size: usize) {
         let kernel = self.kernel_start <= addr;
 
+        // TODO: free frames?
+
         if !kernel && self.kernel_start < addr + size as u64 {
             unsafe {
                 self.free(
@@ -266,6 +270,7 @@ impl<'a> VirtualMemoryManager<'a> {
             }
             size = (self.kernel_start - addr) as _;
         }
+        let (start_addr, end_addr) = (addr, addr + (size - 1) as u64);
 
         match kernel {
             true => self.kernel_alloc.free(addr.as_u64() as _, size),
@@ -273,32 +278,43 @@ impl<'a> VirtualMemoryManager<'a> {
         }
 
         while 0 < size && !addr.is_aligned(HUGE_PAGE_SIZE as u64) {
-            self.page_table
+            let (frame, mapper) = (self.page_table)
                 .unmap(Page::<Size4KiB>::from_start_address(addr).unwrap())
-                .unwrap()
-                .1
-                .flush();
+                .unwrap();
+            mapper.flush();
+            unsafe { self.frame_allocator.deallocate_frame(frame) };
             addr += PAGE_SIZE as u64;
             size -= PAGE_SIZE;
         }
         while HUGE_PAGE_SIZE <= size {
-            self.page_table
+            let (frame, mapper) = (self.page_table)
                 .unmap(Page::<Size2MiB>::from_start_address(addr).unwrap())
-                .unwrap()
-                .1
-                .flush();
+                .unwrap();
+            mapper.flush();
+            unsafe { self.frame_allocator.deallocate_frame(frame) };
             addr += HUGE_PAGE_SIZE as u64;
             size -= HUGE_PAGE_SIZE;
         }
         while 0 < size {
-            self.page_table
+            let (frame, mapper) = (self.page_table)
                 .unmap(Page::<Size4KiB>::from_start_address(addr).unwrap())
-                .unwrap()
-                .1
-                .flush();
+                .unwrap();
+            mapper.flush();
+            unsafe { self.frame_allocator.deallocate_frame(frame) };
             addr += PAGE_SIZE as u64;
             size -= PAGE_SIZE;
         }
+
+        log::info!("Clear page table");
+        unsafe {
+            self.page_table.clean_up_addr_range(
+                Page::range_inclusive(
+                    Page::containing_address(start_addr),
+                    Page::containing_address(end_addr),
+                ),
+                &mut self.frame_allocator,
+            )
+        };
     }
 }
 
@@ -442,4 +458,31 @@ pub fn init(
         spin::Mutex::new(vmm)
     });
     ALLOC.vmm.call_once(|| VMM.get().unwrap());
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct GlobalVmmApicHandler;
+
+impl acpi::AcpiHandler for GlobalVmmApicHandler {
+    unsafe fn map_physical_region<T>(
+        &self,
+        physical_address: usize,
+        size: usize,
+    ) -> acpi::PhysicalMapping<Self, T> {
+        let vmm = VMM.get().unwrap().lock();
+        let virt_addr = vmm.page_table.phys_offset() + physical_address as u64;
+
+        unsafe {
+            acpi::PhysicalMapping::new(
+                physical_address,
+                NonNull::new(virt_addr.as_mut_ptr()).unwrap(),
+                size,
+                size,
+                *self,
+            )
+        }
+    }
+    fn unmap_physical_region<T>(_region: &acpi::PhysicalMapping<Self, T>) {
+        // ignore as we will maintain the whole memory map
+    }
 }

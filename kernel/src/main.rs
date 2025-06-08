@@ -57,6 +57,37 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     unsafe { interrupts::init_apic() };
 
+    let rsdp = boot_info.rsdp_addr.into_option().expect("No RSDP address");
+
+    log::info!("rsdp addr=0x{rsdp:x}");
+
+    let acpi_tables = unsafe {
+        acpi::AcpiTables::from_rsdp(memory::vmm::GlobalVmmApicHandler, rsdp as _).unwrap()
+    };
+
+    let acpi_platform_info = acpi_tables.platform_info().unwrap();
+
+    let acpi::InterruptModel::Apic(acpi_apic) = acpi_platform_info.interrupt_model else {
+        panic!(
+            "Unknown interrupt model: {:?}",
+            acpi_platform_info.interrupt_model
+        );
+    };
+
+    log::info!("acpi_apic = {acpi_apic:#?}");
+
+    let pci_config_regions = acpi::PciConfigRegions::new(&acpi_tables).unwrap();
+
+    log::info!("pci region:");
+    for region in pci_config_regions.iter() {
+        log::info!(
+            "  {{\n    segment_group={},\n    bus_range={:?},\n    phys_addr=0x{:X}\n}}",
+            region.segment_group,
+            region.bus_range,
+            region.physical_address,
+        );
+    }
+
     loop {
         x86_64::instructions::hlt();
     }

@@ -1,6 +1,11 @@
 #![allow(unused)]
 
-use core::{array, iter, mem, ops, ptr::NonNull, slice};
+use core::{
+    array, iter, mem, ops,
+    ptr::NonNull,
+    slice,
+    sync::atomic::{self, AtomicBool},
+};
 
 use bootloader_api::info::{MemoryRegion, MemoryRegionKind};
 use x86_64::{
@@ -26,6 +31,8 @@ struct Buddy<'a> {
     map: &'a mut Bitmap,
 }
 
+static INIT: AtomicBool = AtomicBool::new(false);
+
 pub unsafe fn init(
     mapper: &OffsetPageTable,
     memory_regions: &[MemoryRegion],
@@ -38,7 +45,7 @@ pub unsafe fn init(
 
     let mut phys_alloc = None;
     let mut buddy_map_start = 0;
-    for r in &*memory_regions {
+    for r in memory_regions {
         if r.kind != MemoryRegionKind::Usable || r.start < 0x100000 {
             continue;
         }
@@ -62,7 +69,7 @@ pub unsafe fn init(
 
     let mut start = 0;
     let mut end = 0;
-    for r in memory_regions.iter() {
+    for r in memory_regions {
         if r.kind != MemoryRegionKind::Usable || r.start < 0x100000 {
             continue;
         }
@@ -84,6 +91,8 @@ pub unsafe fn init(
         start &= !4095;
     }
     allocator.free_region(PhysAddr::new(start)..PhysAddr::new(end));
+
+    INIT.store(true, atomic::Ordering::SeqCst);
 
     allocator
 }
@@ -302,10 +311,12 @@ impl<'a> BuddyAllocator<'a> {
     }
 
     pub fn free(&mut self, order: u8, addr: PhysAddr) {
-        // log::info!(
-        //     "free: order={order} range={:?}",
-        //     addr..addr + (1u64 << order)
-        // );
+        if INIT.load(atomic::Ordering::SeqCst) {
+            log::info!(
+                "free: order={order} range={:?}",
+                addr..addr + (1u64 << order)
+            );
+        }
 
         assert!(addr.is_aligned(1u64 << order));
 

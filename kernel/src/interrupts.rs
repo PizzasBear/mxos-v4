@@ -2,17 +2,21 @@ pub mod apic;
 
 use x86_64::{
     PhysAddr,
-    instructions::port::Port,
+    instructions::{interrupts::without_interrupts, port::Port},
     registers::model_specific::Msr,
     structures::idt::{InterruptDescriptorTable, InterruptStackFrame},
 };
 
 use apic::ApicRegs;
 
+#[repr(u8)]
 enum Interrupts {
+    Pic8259Keyboard = 33,
     ApicTimer = 48,
     ApicError,
     ApicSpurious,
+    ApicLint0,
+    ApicLint1,
 }
 
 pub static IDT: spin::Lazy<InterruptDescriptorTable> = spin::Lazy::new(|| {
@@ -20,16 +24,17 @@ pub static IDT: spin::Lazy<InterruptDescriptorTable> = spin::Lazy::new(|| {
     idt.breakpoint.set_handler_fn(breakpoint_handler);
     let double_fault_options = idt.double_fault.set_handler_fn(double_fault_handler);
     unsafe { double_fault_options.set_stack_index(crate::gdt::DOUBLE_FAULT_IST_INDEX) };
+    idt[Interrupts::Pic8259Keyboard as u8].set_handler_fn(apic_keyboard_handler);
     idt[Interrupts::ApicTimer as u8].set_handler_fn(apic_timer_handler);
     idt[Interrupts::ApicError as u8].set_handler_fn(apic_error_handler);
     idt[Interrupts::ApicSpurious as u8].set_handler_fn(apic_spurious_handler);
+    idt[Interrupts::ApicLint0 as u8].set_handler_fn(apic_lint0_handler);
+    idt[Interrupts::ApicLint1 as u8].set_handler_fn(apic_lint1_handler);
     idt
 });
 
 extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
     log::info!("BREAKPOINT\n{stack_frame:#?}");
-
-    crate::sprintln!("Hello there");
 }
 
 extern "x86-interrupt" fn double_fault_handler(
@@ -45,16 +50,35 @@ extern "x86-interrupt" fn apic_timer_handler(_stack_frame: InterruptStackFrame) 
     unsafe { regs.end_interrupt(()) };
 }
 
+extern "x86-interrupt" fn apic_keyboard_handler(_stack_frame: InterruptStackFrame) {
+    let mut regs = APIC_REGS.get().unwrap().clone();
+    log::info!("Keyboard Interrupt");
+    unsafe { regs.end_interrupt(()) };
+}
+
+extern "x86-interrupt" fn apic_lint0_handler(_stack_frame: InterruptStackFrame) {
+    let mut regs = APIC_REGS.get().unwrap().clone();
+    log::info!("Lint0 Interrupt");
+    unsafe { regs.end_interrupt(()) };
+}
+
+extern "x86-interrupt" fn apic_lint1_handler(_stack_frame: InterruptStackFrame) {
+    let mut regs = APIC_REGS.get().unwrap().clone();
+    log::info!("Lint1 Interrupt");
+    unsafe { regs.end_interrupt(()) };
+}
+
 extern "x86-interrupt" fn apic_error_handler(_stack_frame: InterruptStackFrame) {
     let mut regs = APIC_REGS.get().unwrap().clone();
-    log::info!("ERROR: {:?}", unsafe { regs.read_error_status() });
+    log::info!("ERROR: apic_error_handler {:?}", unsafe {
+        regs.read_error_status()
+    });
     unsafe { regs.end_interrupt(()) };
 }
 
 extern "x86-interrupt" fn apic_spurious_handler(stack_frame: InterruptStackFrame) {
-    let mut regs = APIC_REGS.get().unwrap().clone();
-    log::info!("ERROR: {stack_frame:#?}");
-    unsafe { regs.end_interrupt(()) };
+    // let mut regs = APIC_REGS.get().unwrap().clone();
+    log::info!("ERROR: apic_spurious_handler {stack_frame:#?}");
 }
 
 pub fn init_idt() {
@@ -79,7 +103,7 @@ unsafe fn disable_pic8259() {
         wait();
     };
 
-    unsafe {
+    without_interrupts(|| unsafe {
         // Tell each PIC that we're going to send it a three-byte
         // initialization sequence on its data port.
         pic1_command.write(0x11);
@@ -96,7 +120,7 @@ unsafe fn disable_pic8259() {
 
         // Disable the PICS by masking all interrupts
         write_data(0xFF, 0xFF);
-    }
+    })
 }
 
 const IA_APIC_BASE_MSR: u32 = 0x1B;
@@ -120,6 +144,7 @@ pub unsafe fn init_apic() {
     }
 
     let x2apic = feature_info.has_x2apic();
+    log::info!("Has x2apic={x2apic}");
 
     let mut apic_base_msr = Msr::new(IA_APIC_BASE_MSR);
     let mut apic_base_value = unsafe { apic_base_msr.read() } | IA_APIC_BASE_MSR_ENABLE;
@@ -164,6 +189,20 @@ pub unsafe fn init_apic() {
         let mut svr = regs.read_svr();
         svr.set_vector(Interrupts::ApicSpurious as _);
         regs.write_svr(svr);
+
+        let mut lvt = regs.read_lvt_lint0();
+        lvt.set_vector(Interrupts::ApicLint0 as _);
+        lvt.set_delivery_mode(apic::lvt::LVTDeliveryMode::ExtINT);
+        lvt.set_trigger_mode(apic::TriggerMode::Level);
+        lvt.set_mask(false);
+        regs.write_lvt_lint0(lvt);
+
+        let mut lvt = regs.read_lvt_lint1();
+        lvt.set_vector(Interrupts::ApicLint1 as _);
+        lvt.set_delivery_mode(apic::lvt::LVTDeliveryMode::Fixed);
+        lvt.set_trigger_mode(apic::TriggerMode::Level);
+        lvt.set_mask(false);
+        regs.write_lvt_lint1(lvt);
     }
     drop(regs);
 
